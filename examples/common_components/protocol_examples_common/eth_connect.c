@@ -132,7 +132,7 @@ static esp_netif_t *eth_start(void)
         .spics_io_num = CONFIG_EXAMPLE_ETH_SPI_CS_GPIO,
         .queue_size = 20
     };
-#if CONFIG_EXAMPLE_USE_DM9051
+#if CONFIG_EXAMPLE_USE_DM9051 || CONFIG_EXAMPLE_USE_DM9058 || CONFIG_EXAMPLE_USE_DM90518
     /* dm9051 ethernet driver is based on spi driver */
     eth_dm9051_config_t dm9051_config = ETH_DM9051_DEFAULT_CONFIG(CONFIG_EXAMPLE_ETH_SPI_HOST, &spi_devcfg);
     dm9051_config.int_gpio_num = CONFIG_EXAMPLE_ETH_SPI_INT_GPIO;

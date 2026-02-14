@@ -141,6 +141,14 @@ menu "Ethernet"
                 It's also integrated with a 10/100M PHY and MAC.
                 Select this to enable DM9051 driver.
 
+        config ETH_SPI_ETHERNET_DM9058
+            bool "Use DM9058"
+            select ETH_SPI_ETHERNET_DM9051
+            help
+                DM9058 is a fast Ethernet controller with an SPI interface.
+                It's also integrated with a 10/100M PHY and MAC.
+                Select this to enable DM9058 driver.
+
         config ETH_SPI_ETHERNET_W5500
             bool "Use W5500 (MAC RAW)"
             help
