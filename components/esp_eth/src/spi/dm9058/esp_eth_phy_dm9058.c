@@ -232,7 +232,7 @@ err:
     return ret;
 }
 
-esp_eth_phy_t *esp_eth_phy_new_DM9058(const eth_phy_config_t *config)
+esp_eth_phy_t *esp_eth_phy_new_dm9058(const eth_phy_config_t *config)
 {
     esp_eth_phy_t *ret = NULL;
     phy_DM9058_t *DM9058 = calloc(1, sizeof(phy_DM9058_t));

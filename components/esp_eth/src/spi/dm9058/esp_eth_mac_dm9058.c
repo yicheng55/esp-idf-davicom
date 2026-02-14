@@ -81,7 +81,7 @@ typedef struct {
 static void *DM9058_spi_init(const void *spi_config)
 {
     void *ret = NULL;
-    eth_DM9058_config_t *DM9058_config = (eth_DM9058_config_t *)spi_config;
+    eth_dm9058_config_t *DM9058_config = (eth_dm9058_config_t *)spi_config;
     eth_spi_info_t *spi = calloc(1, sizeof(eth_spi_info_t));
     ESP_GOTO_ON_FALSE(spi, NULL, err, TAG, "no memory for SPI context data");
 
@@ -947,7 +947,7 @@ static esp_err_t emac_DM9058_del(esp_eth_mac_t *mac)
     return ESP_OK;
 }
 
-esp_eth_mac_t *esp_eth_mac_new_DM9058(const eth_DM9058_config_t *DM9058_config, const eth_mac_config_t *mac_config)
+esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, const eth_mac_config_t *mac_config)
 {
     esp_eth_mac_t *ret = NULL;
     emac_DM9058_t *emac = NULL;

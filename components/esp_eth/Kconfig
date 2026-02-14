@@ -143,7 +143,6 @@ menu "Ethernet"
 
         config ETH_SPI_ETHERNET_DM9058
             bool "Use DM9058"
-            select ETH_SPI_ETHERNET_DM9051
             help
                 DM9058 is a fast Ethernet controller with an SPI interface.
                 It's also integrated with a 10/100M PHY and MAC.

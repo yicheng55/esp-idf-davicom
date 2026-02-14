@@ -184,13 +184,6 @@ menu "Example Connection Configuration"
 
         endchoice # EXAMPLE_ETHERNET_TYPE
 
-        config EXAMPLE_USE_DM90518
-            bool
-            default EXAMPLE_USE_DM9058
-            select EXAMPLE_USE_SPI_ETHERNET
-            select ETH_USE_SPI_ETHERNET
-            select ETH_SPI_ETHERNET_DM9058
-
         if EXAMPLE_USE_INTERNAL_ETHERNET
             choice EXAMPLE_ETH_PHY_MODEL
                 prompt "Ethernet PHY Device"

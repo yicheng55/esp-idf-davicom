@@ -148,11 +148,6 @@ menu "Example Ethernet Configuration"
                     Select external SPI-Ethernet module (W5500).
         endchoice
 
-        config EXAMPLE_USE_DM90518
-            bool
-            default EXAMPLE_USE_DM9058
-            select ETH_SPI_ETHERNET_DM9058
-
         config EXAMPLE_ETH_SPI_HOST
             int "SPI Host Number"
             range 0 2
