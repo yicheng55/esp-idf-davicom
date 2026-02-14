@@ -29,6 +29,7 @@
 #include "esp_cpu.h"
 #include "esp_timer.h"
 #include "esp_rom_crc.h"
+#include "esp_eth_ptp_dm9058.h"
 
 static const char *TAG = "dm9058.mac";
 
@@ -76,7 +77,8 @@ typedef struct {
     bool flow_ctrl_enabled;
     uint8_t *rx_buffer;
     uint8_t hash_filter_cnt[DM9058_HASH_FILTER_TABLE_SIZE];
-} emac_DM9058_t;
+    esp_eth_ptp_dm9058_t ptp;
+} esp32_DM9058_t;
 
 static void *DM9058_spi_init(const void *spi_config)
 {
@@ -187,56 +189,101 @@ static esp_err_t DM9058_spi_read(void *spi_ctx, uint32_t cmd, uint32_t addr, voi
     return ret;
 }
 
-static inline bool DM9058_mutex_lock(emac_DM9058_t *emac)
+static inline bool DM9058_mutex_lock(esp32_DM9058_t *esp32)
 {
-    return xSemaphoreTake(emac->multi_reg_axs_mutex, pdMS_TO_TICKS(DM9058_MULTI_REG_AXS_TIMEOUT_MS)) == pdTRUE;
+    return xSemaphoreTake(esp32->multi_reg_axs_mutex, pdMS_TO_TICKS(DM9058_MULTI_REG_AXS_TIMEOUT_MS)) == pdTRUE;
 }
 
-static inline bool DM9058_mutex_unlock(emac_DM9058_t *emac)
+static inline bool DM9058_mutex_unlock(esp32_DM9058_t *esp32)
 {
-    return xSemaphoreGive(emac->multi_reg_axs_mutex) == pdTRUE;
+    return xSemaphoreGive(esp32->multi_reg_axs_mutex) == pdTRUE;
+}
+
+static esp_err_t DM9058_register_write(esp32_DM9058_t *esp32, uint8_t reg_addr, uint8_t value);
+static esp_err_t DM9058_register_read(esp32_DM9058_t *esp32, uint8_t reg_addr, uint8_t *value);
+
+static esp_err_t DM9058_ptp_reg_write(void *io_ctx, uint8_t reg, uint8_t value)
+{
+    return DM9058_register_write((esp32_DM9058_t *)io_ctx, reg, value);
+}
+
+static esp_err_t DM9058_ptp_reg_read(void *io_ctx, uint8_t reg, uint8_t *value)
+{
+    return DM9058_register_read((esp32_DM9058_t *)io_ctx, reg, value);
+}
+
+static esp_err_t DM9058_ptp_reg_burst_write(void *io_ctx, uint8_t reg, const uint8_t *buffer, size_t len)
+{
+    esp32_DM9058_t *esp32 = (esp32_DM9058_t *)io_ctx;
+    return esp32->spi.write(esp32->spi.ctx, DM9058_SPI_WR, reg, buffer, len);
+}
+
+static esp_err_t DM9058_ptp_reg_burst_read(void *io_ctx, uint8_t reg, uint8_t *buffer, size_t len)
+{
+    esp32_DM9058_t *esp32 = (esp32_DM9058_t *)io_ctx;
+    return esp32->spi.read(esp32->spi.ctx, DM9058_SPI_RD, reg, buffer, len);
+}
+
+static bool DM9058_ptp_lock(void *io_ctx)
+{
+    return DM9058_mutex_lock((esp32_DM9058_t *)io_ctx);
+}
+
+static void DM9058_ptp_unlock(void *io_ctx)
+{
+    DM9058_mutex_unlock((esp32_DM9058_t *)io_ctx);
+}
+
+static void DM9058_ptp_delay_us(uint32_t us)
+{
+    esp_rom_delay_us(us);
+}
+
+static void DM9058_ptp_delay_ms(uint32_t ms)
+{
+    vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
 /**
  * @brief write value to DM9058 internal register
  */
-static esp_err_t DM9058_register_write(emac_DM9058_t *emac, uint8_t reg_addr, uint8_t value)
+static esp_err_t DM9058_register_write(esp32_DM9058_t *esp32, uint8_t reg_addr, uint8_t value)
 {
-    return emac->spi.write(emac->spi.ctx, DM9058_SPI_WR, reg_addr, &value, 1);
+    return esp32->spi.write(esp32->spi.ctx, DM9058_SPI_WR, reg_addr, &value, 1);
 }
 
 /**
  * @brief read value from DM9058 internal register
  */
-static esp_err_t DM9058_register_read(emac_DM9058_t *emac, uint8_t reg_addr, uint8_t *value)
+static esp_err_t DM9058_register_read(esp32_DM9058_t *esp32, uint8_t reg_addr, uint8_t *value)
 {
-    return emac->spi.read(emac->spi.ctx, DM9058_SPI_RD, reg_addr, value, 1);
+    return esp32->spi.read(esp32->spi.ctx, DM9058_SPI_RD, reg_addr, value, 1);
 }
 
 /**
  * @brief write buffer to DM9058 internal memory
  */
-static esp_err_t DM9058_memory_write(emac_DM9058_t *emac, uint8_t *buffer, uint32_t len)
+static esp_err_t DM9058_memory_write(esp32_DM9058_t *esp32, uint8_t *buffer, uint32_t len)
 {
-    return emac->spi.write(emac->spi.ctx, DM9058_SPI_WR, DM9058_MWCMD, buffer, len);
+    return esp32->spi.write(esp32->spi.ctx, DM9058_SPI_WR, DM9058_MWCMD, buffer, len);
 }
 
 /**
  * @brief read buffer from DM9058 internal memory
  */
-static esp_err_t DM9058_memory_read(emac_DM9058_t *emac, uint8_t *buffer, uint32_t len)
+static esp_err_t DM9058_memory_read(esp32_DM9058_t *esp32, uint8_t *buffer, uint32_t len)
 {
-    return emac->spi.read(emac->spi.ctx, DM9058_SPI_RD, DM9058_MRCMD, buffer, len);
+    return esp32->spi.read(esp32->spi.ctx, DM9058_SPI_RD, DM9058_MRCMD, buffer, len);
 }
 
 /**
  * @brief read mac address from internal registers
  */
-static esp_err_t DM9058_get_mac_addr(emac_DM9058_t *emac)
+static esp_err_t DM9058_get_mac_addr(esp32_DM9058_t *esp32)
 {
     esp_err_t ret = ESP_OK;
     for (int i = 0; i < ETH_ADDR_LEN; i++) {
-        ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_PAR + i, &emac->addr[i]), err, TAG, "read PAR failed");
+        ESP_GOTO_ON_ERROR(DM9058_register_read(esp32, DM9058_PAR + i, &esp32->addr[i]), err, TAG, "read PAR failed");
     }
     return ESP_OK;
 err:
@@ -246,11 +293,11 @@ err:
 /**
  * @brief set new mac address to internal registers
  */
-static esp_err_t DM9058_set_mac_addr(emac_DM9058_t *emac)
+static esp_err_t DM9058_set_mac_addr(esp32_DM9058_t *esp32)
 {
     esp_err_t ret = ESP_OK;
     for (int i = 0; i < ETH_ADDR_LEN; i++) {
-        ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_PAR + i, emac->addr[i]), err, TAG, "write PAR failed");
+        ESP_GOTO_ON_ERROR(DM9058_register_write(esp32, DM9058_PAR + i, esp32->addr[i]), err, TAG, "write PAR failed");
     }
     return ESP_OK;
 err:
@@ -260,19 +307,19 @@ err:
 /**
  * @brief clear multicast hash table
  */
-static esp_err_t DM9058_clear_multicast_table(emac_DM9058_t *emac)
+static esp_err_t DM9058_clear_multicast_table(esp32_DM9058_t *esp32)
 {
     esp_err_t ret = ESP_OK;
     /* Keep multicast hash table empty and use DM9058_BCASTCR to accept broadcast for in better performance */
     for (int i = 0; i < 8; i++) {
-        ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_MAR + i, 0x00), err, TAG, "write MAR failed");
+        ESP_GOTO_ON_ERROR(DM9058_register_write(esp32, DM9058_MAR + i, 0x00), err, TAG, "write MAR failed");
     }
     return ESP_OK;
 err:
     return ret;
 }
 
-static esp_err_t DM9058_hash_filter_modify(emac_DM9058_t *emac, uint8_t *addr, bool add)
+static esp_err_t DM9058_hash_filter_modify(esp32_DM9058_t *esp32, uint8_t *addr, bool add)
 {
     esp_err_t ret = ESP_OK;
 
@@ -284,34 +331,34 @@ static esp_err_t DM9058_hash_filter_modify(emac_DM9058_t *emac, uint8_t *addr, b
     uint8_t hash_bit = hash_value % 8;
 
     uint8_t mar;
-    ESP_GOTO_ON_ERROR(DM9058_register_read(emac, (DM9058_MAR + hash_group), &mar), err, TAG, "read MAR failed");
+    ESP_GOTO_ON_ERROR(DM9058_register_read(esp32, (DM9058_MAR + hash_group), &mar), err, TAG, "read MAR failed");
     if (add) {
         // add address to hash table
         mar |= (1 << hash_bit);
-        emac->hash_filter_cnt[hash_value]++;
+        esp32->hash_filter_cnt[hash_value]++;
     } else {
-        emac->hash_filter_cnt[hash_value]--;
-        if (emac->hash_filter_cnt[hash_value] == 0) {
+        esp32->hash_filter_cnt[hash_value]--;
+        if (esp32->hash_filter_cnt[hash_value] == 0) {
             // remove address from hash table
             mar &= ~(1 << hash_bit);
         }
     }
-    ESP_GOTO_ON_ERROR(DM9058_register_write(emac, (DM9058_MAR + hash_group), mar), err, TAG, "write MAR failed");
+    ESP_GOTO_ON_ERROR(DM9058_register_write(esp32, (DM9058_MAR + hash_group), mar), err, TAG, "write MAR failed");
 
 err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_add_mac_filter(esp_eth_mac_t *mac, uint8_t *addr)
+static esp_err_t esp32_DM9058_add_mac_filter(esp_eth_mac_t *mac, uint8_t *addr)
 {
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     ESP_RETURN_ON_ERROR(DM9058_hash_filter_modify(emac, addr, true), TAG, "modify multicast table failed");
     return ESP_OK;
 }
 
-static esp_err_t emac_DM9058_rm_mac_filter(esp_eth_mac_t *mac, uint8_t *addr)
+static esp_err_t esp32_DM9058_rm_mac_filter(esp_eth_mac_t *mac, uint8_t *addr)
 {
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     ESP_RETURN_ON_ERROR(DM9058_hash_filter_modify(emac, addr, false), TAG, "modify multicast table failed");
     return ESP_OK;
 }
@@ -319,7 +366,7 @@ static esp_err_t emac_DM9058_rm_mac_filter(esp_eth_mac_t *mac, uint8_t *addr)
 /**
  * @brief software reset DM9058 internal register
  */
-static esp_err_t DM9058_reset(emac_DM9058_t *emac)
+static esp_err_t DM9058_reset(esp32_DM9058_t *emac)
 {
     esp_err_t ret = ESP_OK;
     /* power on phy */
@@ -346,7 +393,7 @@ err:
 /**
  * @brief verify DM9058 chip ID
  */
-static esp_err_t DM9058_verify_id(emac_DM9058_t *emac)
+static esp_err_t DM9058_verify_id(esp32_DM9058_t *emac)
 {
     esp_err_t ret = ESP_OK;
     uint8_t id[2];
@@ -364,7 +411,7 @@ err:
 /**
  * @brief default setup for DM9058 internal registers
  */
-static esp_err_t DM9058_setup_default(emac_DM9058_t *emac)
+static esp_err_t DM9058_setup_default(esp32_DM9058_t *emac)
 {
     esp_err_t ret = ESP_OK;
     /* disable wakeup */
@@ -405,7 +452,7 @@ err:
     return ret;
 }
 
-static esp_err_t DM9058_enable_flow_ctrl(emac_DM9058_t *emac, bool enable)
+static esp_err_t DM9058_enable_flow_ctrl(esp32_DM9058_t *emac, bool enable)
 {
     esp_err_t ret = ESP_OK;
     if (enable) {
@@ -427,10 +474,10 @@ err:
 /**
  * @brief start DM9058: enable interrupt and start receive
  */
-static esp_err_t emac_DM9058_start(esp_eth_mac_t *mac)
+static esp_err_t esp32_DM9058_start(esp_eth_mac_t *mac)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     /* reset tx and rx memory pointer */
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_MPTRCR, MPTRCR_RST_RX | MPTRCR_RST_TX), err, TAG, "write MPTRCR failed");
     /* clear interrupt status */
@@ -450,10 +497,10 @@ err:
 /**
  * @brief stop DM9058: disable interrupt and stop receive
  */
-static esp_err_t emac_DM9058_stop(esp_eth_mac_t *mac)
+static esp_err_t esp32_DM9058_stop(esp_eth_mac_t *mac)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     /* IMR_PAR should not be cleared unless Wake-on-LAN (WOL) functionality is required */
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_IMR, IMR_PAR), err, TAG, "write IMR failed");
     /* disable rx */
@@ -468,7 +515,7 @@ err:
 
 IRAM_ATTR static void DM9058_isr_handler(void *arg)
 {
-    emac_DM9058_t *emac = (emac_DM9058_t *)arg;
+    esp32_DM9058_t *emac = (esp32_DM9058_t *)arg;
     BaseType_t high_task_wakeup = pdFALSE;
     /* notify DM9058 task */
     vTaskNotifyGiveFromISR(emac->rx_task_hdl, &high_task_wakeup);
@@ -479,22 +526,22 @@ IRAM_ATTR static void DM9058_isr_handler(void *arg)
 
 static void DM9058_poll_timer(void *arg)
 {
-    emac_DM9058_t *emac = (emac_DM9058_t *)arg;
+    esp32_DM9058_t *emac = (esp32_DM9058_t *)arg;
     xTaskNotifyGive(emac->rx_task_hdl);
 }
 
-static esp_err_t emac_DM9058_set_mediator(esp_eth_mac_t *mac, esp_eth_mediator_t *eth)
+static esp_err_t esp32_DM9058_set_mediator(esp_eth_mac_t *mac, esp_eth_mediator_t *eth)
 {
     esp_err_t ret = ESP_OK;
     ESP_GOTO_ON_FALSE(eth, ESP_ERR_INVALID_ARG, err, TAG, "can't set mac's mediator to null");
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     emac->eth = eth;
     return ESP_OK;
 err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_phy_access_compl(emac_DM9058_t *emac, uint32_t timeout_us)
+static esp_err_t esp32_DM9058_phy_access_compl(esp32_DM9058_t *emac, uint32_t timeout_us)
 {
     uint8_t epcr = 0;
     ESP_RETURN_ON_ERROR(DM9058_register_read(emac, DM9058_EPCR, &epcr), TAG, "read EPCR failed");
@@ -510,42 +557,42 @@ static esp_err_t emac_DM9058_phy_access_compl(emac_DM9058_t *emac, uint32_t time
     return ESP_OK;
 }
 
-static esp_err_t emac_DM9058_write_phy_reg(esp_eth_mac_t *mac, uint32_t phy_addr, uint32_t phy_reg, uint32_t reg_value)
+static esp_err_t esp32_DM9058_write_phy_reg(esp_eth_mac_t *mac, uint32_t phy_addr, uint32_t phy_reg, uint32_t reg_value)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
 
     /* The following commands need to be performed in atomic manner */
     ESP_RETURN_ON_FALSE(DM9058_mutex_lock(emac), ESP_ERR_TIMEOUT, TAG, "multiple register access mutex timeout");
     /* check if no PHY/EEPROM access is in progress */
-    ESP_GOTO_ON_ERROR(emac_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY is busy");
+    ESP_GOTO_ON_ERROR(esp32_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY is busy");
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_EPAR, (uint8_t)(((phy_addr << 6) & 0xFF) | phy_reg)), err, TAG, "write EPAR failed");
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_EPDRL, (uint8_t)(reg_value & 0xFF)), err, TAG, "write EPDRL failed");
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_EPDRH, (uint8_t)((reg_value >> 8) & 0xFF)), err, TAG, "write EPDRH failed");
     /* select PHY and select write operation */
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_EPCR, EPCR_EPOS | EPCR_ERPRW), err, TAG, "write EPCR failed");
     /* wait for PHY access completion */
-    ESP_GOTO_ON_ERROR(emac_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY access completion check failed");
+    ESP_GOTO_ON_ERROR(esp32_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY access completion check failed");
 err:
     DM9058_mutex_unlock(emac);
     return ret;
 }
 
-static esp_err_t emac_DM9058_read_phy_reg(esp_eth_mac_t *mac, uint32_t phy_addr, uint32_t phy_reg, uint32_t *reg_value)
+static esp_err_t esp32_DM9058_read_phy_reg(esp_eth_mac_t *mac, uint32_t phy_addr, uint32_t phy_reg, uint32_t *reg_value)
 {
     esp_err_t ret = ESP_OK;
     ESP_RETURN_ON_FALSE(reg_value, ESP_ERR_INVALID_ARG, TAG, "can't set reg_value to null");
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
 
     /* The following commands need to be performed in atomic manner */
     ESP_RETURN_ON_FALSE(DM9058_mutex_lock(emac), ESP_ERR_TIMEOUT, TAG, "multiple register access mutex timeout");
     /* check if no PHY/EEPROM access is in progress */
-    ESP_GOTO_ON_ERROR(emac_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY is busy");
+    ESP_GOTO_ON_ERROR(esp32_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY is busy");
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_EPAR, (uint8_t)(((phy_addr << 6) & 0xFF) | phy_reg)), err, TAG, "write EPAR failed");
     /* Select PHY and select read operation */
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_EPCR, EPCR_EPOS | EPCR_ERPRR), err, TAG, "write EPCR failed");
     /* wait for PHY access completion */
-    ESP_GOTO_ON_ERROR(emac_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY access completion check failed");
+    ESP_GOTO_ON_ERROR(esp32_DM9058_phy_access_compl(emac, DM9058_PHY_OPERATION_TIMEOUT_US), err, TAG, "PHY access completion check failed");
     uint8_t value_h = 0;
     uint8_t value_l = 0;
     ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_EPDRH, &value_h), err, TAG, "read EPDRH failed");
@@ -556,11 +603,11 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_set_addr(esp_eth_mac_t *mac, uint8_t *addr)
+static esp_err_t esp32_DM9058_set_addr(esp_eth_mac_t *mac, uint8_t *addr)
 {
     esp_err_t ret = ESP_OK;
     ESP_GOTO_ON_FALSE(addr, ESP_ERR_INVALID_ARG, err, TAG, "can't set mac addr to null");
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     memcpy(emac->addr, addr, 6);
     ESP_GOTO_ON_ERROR(DM9058_set_mac_addr(emac), err, TAG, "set mac address failed");
     return ESP_OK;
@@ -568,21 +615,21 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_get_addr(esp_eth_mac_t *mac, uint8_t *addr)
+static esp_err_t esp32_DM9058_get_addr(esp_eth_mac_t *mac, uint8_t *addr)
 {
     esp_err_t ret = ESP_OK;
     ESP_GOTO_ON_FALSE(addr, ESP_ERR_INVALID_ARG, err, TAG, "can't set mac addr to null");
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     memcpy(addr, emac->addr, 6);
     return ESP_OK;
 err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_set_link(esp_eth_mac_t *mac, eth_link_t link)
+static esp_err_t esp32_DM9058_set_link(esp_eth_mac_t *mac, eth_link_t link)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     switch (link) {
     case ETH_LINK_UP:
         ESP_GOTO_ON_ERROR(mac->start(mac), err, TAG, "DM9058 start failed");
@@ -607,7 +654,7 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_set_speed(esp_eth_mac_t *mac, eth_speed_t speed)
+static esp_err_t esp32_DM9058_set_speed(esp_eth_mac_t *mac, eth_speed_t speed)
 {
     esp_err_t ret = ESP_OK;
     switch (speed) {
@@ -626,7 +673,7 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_set_duplex(esp_eth_mac_t *mac, eth_duplex_t duplex)
+static esp_err_t esp32_DM9058_set_duplex(esp_eth_mac_t *mac, eth_duplex_t duplex)
 {
     esp_err_t ret = ESP_OK;
     switch (duplex) {
@@ -645,10 +692,10 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_set_promiscuous(esp_eth_mac_t *mac, bool enable)
+static esp_err_t esp32_DM9058_set_promiscuous(esp_eth_mac_t *mac, bool enable)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     uint8_t rcr = 0;
     ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_RCR, &rcr), err, TAG, "read RCR failed");
     if (enable) {
@@ -662,10 +709,10 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_set_all_multicast(esp_eth_mac_t *mac, bool enable)
+static esp_err_t esp32_DM9058_set_all_multicast(esp_eth_mac_t *mac, bool enable)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     uint8_t rcr = 0;
     ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_RCR, &rcr), err, TAG, "read RCR failed");
     if (enable) {
@@ -678,16 +725,16 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_enable_flow_ctrl(esp_eth_mac_t *mac, bool enable)
+static esp_err_t esp32_DM9058_enable_flow_ctrl(esp_eth_mac_t *mac, bool enable)
 {
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     emac->flow_ctrl_enabled = enable;
     return ESP_OK;
 }
 
-static esp_err_t emac_DM9058_set_peer_pause_ability(esp_eth_mac_t *mac, uint32_t ability)
+static esp_err_t esp32_DM9058_set_peer_pause_ability(esp_eth_mac_t *mac, uint32_t ability)
 {
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     // we want to enable flow control, and peer does support pause function
     // then configure the MAC layer to enable flow control feature
     if (emac->flow_ctrl_enabled && ability) {
@@ -699,10 +746,50 @@ static esp_err_t emac_DM9058_set_peer_pause_ability(esp_eth_mac_t *mac, uint32_t
     return ESP_OK;
 }
 
-static esp_err_t emac_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t length)
+static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *data)
+{
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
+    esp_eth_ptp_dm9058_time_t ptp_time = {0};
+    eth_mac_time_t *time = (eth_mac_time_t *)data;
+
+    switch (cmd) {
+    case ETH_MAC_DM9058_CMD_PTP_ENABLE:
+        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_ENABLE expects bool*");
+        return esp_eth_ptp_dm9058_enable(&emac->ptp, *(bool *)data, ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4);
+    case ETH_MAC_DM9058_CMD_S_PTP_TIME:
+        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "S_PTP_TIME expects eth_mac_time_t*");
+        ptp_time.seconds = time->seconds;
+        ptp_time.nanoseconds = time->nanoseconds;
+        return esp_eth_ptp_dm9058_set_time(&emac->ptp, &ptp_time);
+    case ETH_MAC_DM9058_CMD_G_PTP_TIME:
+        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_TIME expects eth_mac_time_t*");
+        ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_get_time(&emac->ptp, &ptp_time), TAG, "get ptp time failed");
+        time->seconds = ptp_time.seconds;
+        time->nanoseconds = ptp_time.nanoseconds;
+        return ESP_OK;
+    case ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ:
+        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "ADJ_PTP_FREQ expects int32_t*");
+        return esp_eth_ptp_dm9058_adj_freq(&emac->ptp, *(int32_t *)data);
+    case ETH_MAC_DM9058_CMD_ADJ_PTP_TIME:
+        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "ADJ_PTP_TIME expects eth_mac_time_t*");
+        ptp_time.seconds = (uint32_t)((int32_t)time->seconds);
+        ptp_time.nanoseconds = (uint32_t)((int32_t)time->nanoseconds);
+        return esp_eth_ptp_dm9058_adj_time(&emac->ptp, &ptp_time);
+    case ETH_MAC_DM9058_CMD_G_PTP_TX_TIME:
+        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_TX_TIME expects eth_mac_time_t*");
+        ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_get_tx_timestamp(&emac->ptp, &ptp_time), TAG, "get tx timestamp failed");
+        time->seconds = ptp_time.seconds;
+        time->nanoseconds = ptp_time.nanoseconds;
+        return ESP_OK;
+    default:
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+}
+
+static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t length)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
 
     ESP_GOTO_ON_FALSE(length <= ETH_MAX_PACKET_SIZE, ESP_ERR_INVALID_ARG, err,
                       TAG, "frame size is too big (actual %" PRIu32 ", maximum %d)", length, ETH_MAX_PACKET_SIZE);
@@ -733,7 +820,7 @@ err:
     return ret;
 }
 
-static esp_err_t DM9058_skip_recv_frame(emac_DM9058_t *emac, uint16_t rx_length)
+static esp_err_t DM9058_skip_recv_frame(esp32_DM9058_t *emac, uint16_t rx_length)
 {
     esp_err_t ret = ESP_OK;
     uint8_t mrrh, mrrl;
@@ -750,7 +837,7 @@ err:
     return ret;
 }
 
-static esp_err_t DM9058_flush_recv_queue(emac_DM9058_t *emac)
+static esp_err_t DM9058_flush_recv_queue(esp32_DM9058_t *emac)
 {
     esp_err_t ret = ESP_OK;
     ESP_GOTO_ON_ERROR(emac->parent.stop(&emac->parent), err, TAG, "stop DM9058 failed");
@@ -762,7 +849,7 @@ err:
     return ret;
 }
 
-static esp_err_t DM9058_frame_to_rx_buffer(emac_DM9058_t *emac, uint16_t *size)
+static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
 {
     esp_err_t ret = ESP_OK;
     uint8_t rxbyte = 0;
@@ -806,10 +893,10 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_receive(esp_eth_mac_t *mac, uint8_t *buf, uint32_t *length)
+static esp_err_t esp32_DM9058_receive(esp_eth_mac_t *mac, uint8_t *buf, uint32_t *length)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     uint16_t byte_count = 0;
     emac->packets_remain = false;
 
@@ -842,10 +929,10 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_init(esp_eth_mac_t *mac)
+static esp_err_t esp32_DM9058_init(esp_eth_mac_t *mac)
 {
     esp_err_t ret = ESP_OK;
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     esp_eth_mediator_t *eth = emac->eth;
     if (emac->int_gpio_num >= 0) {
         gpio_func_sel(emac->int_gpio_num, PIN_FUNC_GPIO);
@@ -875,9 +962,9 @@ err:
     return ret;
 }
 
-static esp_err_t emac_DM9058_deinit(esp_eth_mac_t *mac)
+static esp_err_t esp32_DM9058_deinit(esp_eth_mac_t *mac)
 {
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     esp_eth_mediator_t *eth = emac->eth;
     mac->stop(mac);
     if (emac->int_gpio_num >= 0) {
@@ -890,9 +977,9 @@ static esp_err_t emac_DM9058_deinit(esp_eth_mac_t *mac)
     return ESP_OK;
 }
 
-static void emac_DM9058_task(void *arg)
+static void esp32_DM9058_task(void *arg)
 {
-    emac_DM9058_t *emac = (emac_DM9058_t *)arg;
+    esp32_DM9058_t *emac = (esp32_DM9058_t *)arg;
     uint8_t status = 0;
     while (1) {
         // check if the task receives any notification
@@ -933,9 +1020,9 @@ static void emac_DM9058_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static esp_err_t emac_DM9058_del(esp_eth_mac_t *mac)
+static esp_err_t esp32_DM9058_del(esp_eth_mac_t *mac)
 {
-    emac_DM9058_t *emac = __containerof(mac, emac_DM9058_t, parent);
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
     if (emac->poll_timer) {
         esp_timer_delete(emac->poll_timer);
     }
@@ -950,37 +1037,38 @@ static esp_err_t emac_DM9058_del(esp_eth_mac_t *mac)
 esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, const eth_mac_config_t *mac_config)
 {
     esp_eth_mac_t *ret = NULL;
-    emac_DM9058_t *emac = NULL;
+    esp32_DM9058_t *emac = NULL;
     ESP_GOTO_ON_FALSE(DM9058_config, NULL, err, TAG, "can't set DM9058 specific config to null");
     ESP_GOTO_ON_FALSE(mac_config, NULL, err, TAG, "can't set mac config to null");
     ESP_GOTO_ON_FALSE((DM9058_config->int_gpio_num >= 0) != (DM9058_config->poll_period_ms > 0), NULL, err, TAG, "invalid configuration argument combination");
-    emac = calloc(1, sizeof(emac_DM9058_t));
+    emac = calloc(1, sizeof(esp32_DM9058_t));
     ESP_GOTO_ON_FALSE(emac, NULL, err, TAG, "calloc emac failed");
     /* bind methods and attributes */
     emac->sw_reset_timeout_ms = mac_config->sw_reset_timeout_ms;
     emac->int_gpio_num = DM9058_config->int_gpio_num;
     emac->poll_period_ms = DM9058_config->poll_period_ms;
-    emac->parent.set_mediator = emac_DM9058_set_mediator;
-    emac->parent.init = emac_DM9058_init;
-    emac->parent.deinit = emac_DM9058_deinit;
-    emac->parent.start = emac_DM9058_start;
-    emac->parent.stop = emac_DM9058_stop;
-    emac->parent.del = emac_DM9058_del;
-    emac->parent.write_phy_reg = emac_DM9058_write_phy_reg;
-    emac->parent.read_phy_reg = emac_DM9058_read_phy_reg;
-    emac->parent.set_addr = emac_DM9058_set_addr;
-    emac->parent.get_addr = emac_DM9058_get_addr;
-    emac->parent.set_speed = emac_DM9058_set_speed;
-    emac->parent.set_duplex = emac_DM9058_set_duplex;
-    emac->parent.set_link = emac_DM9058_set_link;
-    emac->parent.set_promiscuous = emac_DM9058_set_promiscuous;
-    emac->parent.set_all_multicast = emac_DM9058_set_all_multicast;
-    emac->parent.set_peer_pause_ability = emac_DM9058_set_peer_pause_ability;
-    emac->parent.enable_flow_ctrl = emac_DM9058_enable_flow_ctrl;
-    emac->parent.transmit = emac_DM9058_transmit;
-    emac->parent.receive = emac_DM9058_receive;
-    emac->parent.add_mac_filter = emac_DM9058_add_mac_filter;
-    emac->parent.rm_mac_filter = emac_DM9058_rm_mac_filter;
+    emac->parent.set_mediator = esp32_DM9058_set_mediator;
+    emac->parent.init = esp32_DM9058_init;
+    emac->parent.deinit = esp32_DM9058_deinit;
+    emac->parent.start = esp32_DM9058_start;
+    emac->parent.stop = esp32_DM9058_stop;
+    emac->parent.del = esp32_DM9058_del;
+    emac->parent.write_phy_reg = esp32_DM9058_write_phy_reg;
+    emac->parent.read_phy_reg = esp32_DM9058_read_phy_reg;
+    emac->parent.set_addr = esp32_DM9058_set_addr;
+    emac->parent.get_addr = esp32_DM9058_get_addr;
+    emac->parent.set_speed = esp32_DM9058_set_speed;
+    emac->parent.set_duplex = esp32_DM9058_set_duplex;
+    emac->parent.set_link = esp32_DM9058_set_link;
+    emac->parent.set_promiscuous = esp32_DM9058_set_promiscuous;
+    emac->parent.set_all_multicast = esp32_DM9058_set_all_multicast;
+    emac->parent.set_peer_pause_ability = esp32_DM9058_set_peer_pause_ability;
+    emac->parent.enable_flow_ctrl = esp32_DM9058_enable_flow_ctrl;
+    emac->parent.transmit = esp32_DM9058_transmit;
+    emac->parent.receive = esp32_DM9058_receive;
+    emac->parent.add_mac_filter = esp32_DM9058_add_mac_filter;
+    emac->parent.rm_mac_filter = esp32_DM9058_rm_mac_filter;
+    emac->parent.custom_ioctl = esp32_DM9058_custom_ioctl;
 
     if (DM9058_config->custom_spi_driver.init != NULL && DM9058_config->custom_spi_driver.deinit != NULL
             && DM9058_config->custom_spi_driver.read != NULL && DM9058_config->custom_spi_driver.write != NULL) {
@@ -1005,12 +1093,24 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
     emac->multi_reg_axs_mutex = xSemaphoreCreateMutex();
     ESP_GOTO_ON_FALSE(emac->multi_reg_axs_mutex, NULL, err, TAG, "create multi registers access mutex failed");
 
+    const esp_eth_ptp_dm9058_ops_t ptp_ops = {
+        .reg_read = DM9058_ptp_reg_read,
+        .reg_write = DM9058_ptp_reg_write,
+        .reg_burst_read = DM9058_ptp_reg_burst_read,
+        .reg_burst_write = DM9058_ptp_reg_burst_write,
+        .delay_us = DM9058_ptp_delay_us,
+        .delay_ms = DM9058_ptp_delay_ms,
+        .lock = DM9058_ptp_lock,
+        .unlock = DM9058_ptp_unlock,
+    };
+    ESP_GOTO_ON_ERROR(esp_eth_ptp_dm9058_init(&emac->ptp, emac, &ptp_ops), err, TAG, "init dm9058 ptp context failed");
+
     /* create DM9058 task */
     BaseType_t core_num = tskNO_AFFINITY;
     if (mac_config->flags & ETH_MAC_FLAG_PIN_TO_CORE) {
         core_num = esp_cpu_get_core_id();
     }
-    BaseType_t xReturned = xTaskCreatePinnedToCore(emac_DM9058_task, "DM9058_tsk", mac_config->rx_task_stack_size, emac,
+    BaseType_t xReturned = xTaskCreatePinnedToCore(esp32_DM9058_task, "DM9058_tsk", mac_config->rx_task_stack_size, emac,
                                                    mac_config->rx_task_prio, &emac->rx_task_hdl, core_num);
     ESP_GOTO_ON_FALSE(xReturned == pdPASS, NULL, err, TAG, "create DM9058 task failed");
 
@@ -1020,7 +1120,7 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
     if (emac->int_gpio_num < 0) {
         const esp_timer_create_args_t poll_timer_args = {
             .callback = DM9058_poll_timer,
-            .name = "emac_spi_poll_timer",
+            .name = "esp32_spi_poll_timer",
             .arg = emac,
             .skip_unhandled_events = true
         };

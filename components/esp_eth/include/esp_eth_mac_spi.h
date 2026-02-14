@@ -167,6 +167,18 @@ typedef struct {
 } eth_dm9058_config_t;
 
 /**
+ * @brief List of DM9058 specific commands for ioctl API
+ */
+typedef enum {
+    ETH_MAC_DM9058_CMD_PTP_ENABLE = ETH_CMD_CUSTOM_MAC_CMDS_OFFSET, /*!< Enable IEEE1588 timestamping in DM9058 */
+    ETH_MAC_DM9058_CMD_S_PTP_TIME,                                   /*!< Set PTP time in DM9058 */
+    ETH_MAC_DM9058_CMD_G_PTP_TIME,                                   /*!< Get PTP time from DM9058 */
+    ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ,                                 /*!< Adjust PTP frequency by ppb value */
+    ETH_MAC_DM9058_CMD_ADJ_PTP_TIME,                                 /*!< Adjust PTP time by signed offset */
+    ETH_MAC_DM9058_CMD_G_PTP_TX_TIME                                 /*!< Get last TX timestamp from DM9058 */
+} eth_mac_dm9058_io_cmd_t;
+
+/**
  * @brief Default DM9058 specific configuration
  *
  */
