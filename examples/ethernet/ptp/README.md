@@ -31,6 +31,14 @@ Set up the Python environment and ESP-IDF tools by running the export script:
 PS D:\prg\esp-idf\esp-idf-davicom\examples\ethernet\ptp> & "D:\prg\esp-idf\esp-idf-davicom\export.ps1"
 idf.py set-target esp32s3
 
+目前可用流程（每次新開終端先跑一次）：
+& D:\prg\esp-idf\esp-idf-davicom\export.ps1
+Set-Location D:\prg\esp-idf\esp-idf-davicom\examples\ethernet\ptp
+idf.py set-target esp32s3
+idf.py build
+若要燒錄：
+idf.py -p COMx flash monitor
+
 Run the:
 
 ```
