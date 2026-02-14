@@ -781,6 +781,14 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         time->seconds = ptp_time.seconds;
         time->nanoseconds = ptp_time.nanoseconds;
         return ESP_OK;
+    case ETH_MAC_DM9058_CMD_S_TARGET_TIME:
+        // Target time not yet supported in DM9058
+        ESP_LOGW(TAG, "Target time feature not yet implemented for DM9058");
+        return ESP_ERR_NOT_SUPPORTED;
+    case ETH_MAC_DM9058_CMD_S_TARGET_CB:
+        // Target callback not yet supported in DM9058
+        ESP_LOGW(TAG, "Target callback feature not yet implemented for DM9058");
+        return ESP_ERR_NOT_SUPPORTED;
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -1103,7 +1111,7 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
         .lock = DM9058_ptp_lock,
         .unlock = DM9058_ptp_unlock,
     };
-    ESP_GOTO_ON_ERROR(esp_eth_ptp_dm9058_init(&emac->ptp, emac, &ptp_ops), err, TAG, "init dm9058 ptp context failed");
+    ESP_GOTO_ON_FALSE(esp_eth_ptp_dm9058_init(&emac->ptp, emac, &ptp_ops) == ESP_OK, NULL, err, TAG, "init dm9058 ptp context failed");
 
     /* create DM9058 task */
     BaseType_t core_num = tskNO_AFFINITY;
