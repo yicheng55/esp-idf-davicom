@@ -39,6 +39,8 @@ static const char *TAG = "dm9058.mac";
 #define DM9058_RX_MEM_START_ADDR        (3072)
 #define DM9058_RX_MEM_MAX_SIZE          (16384)
 #define DM9058_RX_HDR_SIZE              (4)
+#define DM9058_RSR_RXTS_LEN             (1 << 2)
+#define DM9058_RSR_RXTS_EN              (1 << 5)
 
 #define DM9058_HASH_FILTER_TABLE_SIZE   (64)
 
@@ -78,6 +80,10 @@ typedef struct {
     uint8_t *rx_buffer;
     uint8_t hash_filter_cnt[DM9058_HASH_FILTER_TABLE_SIZE];
     esp_eth_ptp_dm9058_t ptp;
+    bool ptp_auto_process;
+    bool ptp_two_step_mode;
+    bool rx_timestamp_valid;
+    esp_eth_ptp_dm9058_time_t last_rx_timestamp;
 } esp32_DM9058_t;
 
 static void *DM9058_spi_init(const void *spi_config)
@@ -755,7 +761,12 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
     switch (cmd) {
     case ETH_MAC_DM9058_CMD_PTP_ENABLE:
         ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_ENABLE expects bool*");
+        emac->rx_timestamp_valid = false;
         return esp_eth_ptp_dm9058_enable(&emac->ptp, *(bool *)data, ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4);
+    case ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS:
+        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_AUTO_PROCESS expects bool*");
+        emac->ptp_auto_process = *(bool *)data;
+        return ESP_OK;
     case ETH_MAC_DM9058_CMD_S_PTP_TIME:
         ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "S_PTP_TIME expects eth_mac_time_t*");
         ptp_time.seconds = time->seconds;
@@ -781,6 +792,13 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         time->seconds = ptp_time.seconds;
         time->nanoseconds = ptp_time.nanoseconds;
         return ESP_OK;
+    case ETH_MAC_DM9058_CMD_G_PTP_RX_TIME:
+        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_RX_TIME expects eth_mac_time_t*");
+        ESP_RETURN_ON_FALSE(emac->rx_timestamp_valid, ESP_ERR_NOT_FOUND, TAG, "rx timestamp not available");
+        time->seconds = emac->last_rx_timestamp.seconds;
+        time->nanoseconds = emac->last_rx_timestamp.nanoseconds;
+        emac->rx_timestamp_valid = false;
+        return ESP_OK;
     case ETH_MAC_DM9058_CMD_S_TARGET_TIME:
         // Target time not yet supported in DM9058
         ESP_LOGW(TAG, "Target time feature not yet implemented for DM9058");
@@ -794,35 +812,91 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
     }
 }
 
+static esp_err_t DM9058_wait_tx_pointer(esp32_DM9058_t *emac, uint32_t timeout_us)
+{
+    uint8_t reg_nsr = 0;
+    int64_t start = esp_timer_get_time();
+
+    do {
+        ESP_RETURN_ON_ERROR(DM9058_register_read(emac, DM9058_NSR, &reg_nsr), TAG, "read NSR failed");
+        reg_nsr &= (NSR_TX2END | NSR_TX1END);
+        if (reg_nsr) {
+            break;
+        }
+    } while ((esp_timer_get_time() - start) < timeout_us);
+
+    ESP_RETURN_ON_FALSE(reg_nsr != 0, ESP_ERR_INVALID_STATE, TAG, "last transmit still in progress, cannot send");
+
+    if (reg_nsr == (NSR_TX2END | NSR_TX1END)) {
+        ESP_RETURN_ON_ERROR(DM9058_register_write(emac, DM9058_MPTRCR, MPTRCR_RST_TX), TAG, "write MPTRCR failed");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t DM9058_wait_tx_complete(esp32_DM9058_t *emac, uint32_t timeout_us)
+{
+    uint8_t tcr = 0;
+    int64_t start = esp_timer_get_time();
+
+    do {
+        ESP_RETURN_ON_ERROR(DM9058_register_read(emac, DM9058_TCR, &tcr), TAG, "read TCR failed");
+        if ((tcr & TCR_TXREQ) == 0) {
+            return ESP_OK;
+        }
+    } while ((esp_timer_get_time() - start) < timeout_us);
+
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t DM9058_trigger_tx_request(esp32_DM9058_t *emac)
+{
+    uint8_t tcr = 0;
+    ESP_RETURN_ON_ERROR(DM9058_register_read(emac, DM9058_TCR, &tcr), TAG, "read TCR failed");
+    tcr |= TCR_TXREQ;
+    ESP_RETURN_ON_ERROR(DM9058_register_write(emac, DM9058_TCR, tcr), TAG, "write TCR failed");
+    return ESP_OK;
+}
+
 static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t length)
 {
+    const uint32_t tx_pointer_timeout_us = 500;
+    const uint32_t tx_complete_timeout_us = 500;
     esp_err_t ret = ESP_OK;
     esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
 
+    ESP_GOTO_ON_FALSE(buf != NULL, ESP_ERR_INVALID_ARG, err, TAG, "tx buffer is null");
     ESP_GOTO_ON_FALSE(length <= ETH_MAX_PACKET_SIZE, ESP_ERR_INVALID_ARG, err,
                       TAG, "frame size is too big (actual %" PRIu32 ", maximum %d)", length, ETH_MAX_PACKET_SIZE);
 
-    uint8_t reg_nsr = 0;
-    int64_t wait_time =  esp_timer_get_time();
-    do {
-        ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_NSR, &reg_nsr), err, TAG, "read NSR failed");
-        reg_nsr &= (NSR_TX2END | NSR_TX1END);
-    } while((!reg_nsr) && ((esp_timer_get_time() - wait_time) < 100));
+    /* Step 1: wait TX pointer ready (similar to tx_pointer_timeout flow) */
+    ESP_GOTO_ON_ERROR(DM9058_wait_tx_pointer(emac, tx_pointer_timeout_us), err, TAG, "wait tx pointer failed");
 
-    if (!reg_nsr) {
-        ESP_LOGE(TAG, "last transmit still in progress, cannot send.");
-        return ESP_ERR_INVALID_STATE;
+    /* Step 2: PTP packet parse/configure (similar to ptp_tx_tstamp_parse_packet flow) */
+    if (emac->ptp_auto_process && emac->ptp.enabled) {
+        esp_err_t ptp_ret = esp_eth_ptp_dm9058_prepare_tx(&emac->ptp, buf, length, emac->ptp_two_step_mode);
+        if (ptp_ret != ESP_OK) {
+            ESP_LOGW(TAG, "prepare tx ptp failed: %s", esp_err_to_name(ptp_ret));
+        }
     }
 
-    if(reg_nsr == (NSR_TX2END | NSR_TX1END)) {
-        ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_MPTRCR, MPTRCR_RST_TX), err, TAG, "write MPTRCR failed");
-    }
-
+    /* Step 3: write frame (similar to cspi_tx_write flow) */
     /* set tx length */
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_TXPLL, length & 0xFF), err, TAG, "write TXPLL failed");
     ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_TXPLH, (length >> 8) & 0xFF), err, TAG, "write TXPLH failed");
     /* copy data to tx memory */
     ESP_GOTO_ON_ERROR(DM9058_memory_write(emac, buf, length), err, TAG, "write memory failed");
+
+    /* Step 4: explicit TX request trigger (equivalent to HAL_write_reg(DM9058_TCR, tcr_wr)) */
+    ESP_GOTO_ON_ERROR(DM9058_trigger_tx_request(emac), err, TAG, "trigger tx request failed");
+
+    /* Step 5: wait tx complete (similar to tx_compl_timeout flow) */
+    if (emac->ptp_auto_process && emac->ptp.enabled) {
+        esp_err_t wait_ret = DM9058_wait_tx_complete(emac, tx_complete_timeout_us);
+        if (wait_ret != ESP_OK) {
+            ESP_LOGW(TAG, "wait tx complete timeout: %s", esp_err_to_name(wait_ret));
+        }
+    }
+
     return ESP_OK;
 err:
     return ret;
@@ -857,6 +931,54 @@ err:
     return ret;
 }
 
+static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM9058_rx_header_t *header)
+{
+    if (!emac->ptp_auto_process || !emac->ptp.enabled) {
+        emac->rx_timestamp_valid = false;
+        return ESP_OK;
+    }
+
+    uint8_t rx_header_bytes[DM9058_RX_HDR_SIZE] = {
+        header->flag,
+        header->status,
+        header->length_low,
+        header->length_high,
+    };
+    esp_eth_ptp_dm9058_rx_info_t rx_info = {0};
+    esp_err_t parse_ret = esp_eth_ptp_dm9058_parse_rx_header(rx_header_bytes, sizeof(rx_header_bytes), ETH_MAX_PACKET_SIZE, &rx_info);
+
+    size_t timestamp_len = 0;
+    if (parse_ret == ESP_OK) {
+        timestamp_len = rx_info.timestamp_available ? rx_info.timestamp_len : 0;
+    } else if (header->status & DM9058_RSR_RXTS_EN) {
+        timestamp_len = (header->status & DM9058_RSR_RXTS_LEN) ? 8 : 4;
+    }
+
+    if (timestamp_len == 0) {
+        emac->rx_timestamp_valid = false;
+        return ESP_OK;
+    }
+
+    uint8_t ts_buffer[8] = {0};
+    ESP_RETURN_ON_FALSE(timestamp_len <= sizeof(ts_buffer), ESP_ERR_INVALID_SIZE, TAG, "timestamp too long");
+    ESP_RETURN_ON_ERROR(DM9058_memory_read(emac, ts_buffer, timestamp_len), TAG, "read rx timestamp failed");
+
+    if (parse_ret == ESP_OK) {
+        esp_err_t decode_ret = esp_eth_ptp_dm9058_rx_timestamp(ts_buffer, timestamp_len, &emac->last_rx_timestamp);
+        if (decode_ret == ESP_OK) {
+            emac->rx_timestamp_valid = true;
+            ESP_LOGD(TAG, "RX PTP timestamp: %lu.%09lu", emac->last_rx_timestamp.seconds, emac->last_rx_timestamp.nanoseconds);
+        } else {
+            emac->rx_timestamp_valid = false;
+            ESP_LOGW(TAG, "decode rx timestamp failed: %s", esp_err_to_name(decode_ret));
+        }
+    } else {
+        emac->rx_timestamp_valid = false;
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
 {
     esp_err_t ret = ESP_OK;
@@ -881,6 +1003,7 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             /* store the whole frame to preallocated memory */
             if (rx_len <= ETH_MAX_PACKET_SIZE) {
                 ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
+                ESP_GOTO_ON_ERROR(DM9058_handle_rx_ptp_timestamp(emac, &header), err, TAG, "handle rx ptp timestamp failed");
             } else {
                 /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
                 ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
@@ -1112,6 +1235,9 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
         .unlock = DM9058_ptp_unlock,
     };
     ESP_GOTO_ON_FALSE(esp_eth_ptp_dm9058_init(&emac->ptp, emac, &ptp_ops) == ESP_OK, NULL, err, TAG, "init dm9058 ptp context failed");
+    emac->ptp_auto_process = true;
+    emac->ptp_two_step_mode = true;
+    emac->rx_timestamp_valid = false;
 
     /* create DM9058 task */
     BaseType_t core_num = tskNO_AFFINITY;
