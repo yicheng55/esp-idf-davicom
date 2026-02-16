@@ -871,7 +871,7 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
         if (reg_nsr & NSR_RXRDY) {
             /* dummy read, get the most updated data */
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
-            ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX1, &rxbyte), err, TAG, "read MRCMDX failed");
+            ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
             if (0x01 != rxbyte) {
                 ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
                 ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
