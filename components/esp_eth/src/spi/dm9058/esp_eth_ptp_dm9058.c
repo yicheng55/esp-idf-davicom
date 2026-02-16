@@ -12,6 +12,11 @@
 #define DM9058_PTPCSO (0x66)
 #define DM9058_PTPTS  (0x68)
 
+/* TX Control Register (0x02) - PTP bits */
+#define DM9058_TCR    (0x02)
+#define DM9058_TCR_TSEN_CAP      (1 << 7)  /* Enable TX timestamp capture */
+#define DM9058_TCR_TS1STEP_EMIT  (1 << 6)  /* Enable one-step timestamp insertion */
+
 #define DM9058_PTP_TCR_ENABLE             (0x01)
 #define DM9058_PTP_TCR_RESET_INDEX        (0x80)
 #define DM9058_PTP_TCR_READ_CLOCK         (0x84)
@@ -23,6 +28,18 @@
 
 /* 2^32 * 40 / 1e9 in Q16 format */
 #define DM9058_PTP_FREQ_BASE_ADDEND_Q16   (11259106)
+
+/* Network protocol constants for packet parsing */
+#define ETH_HLEN              14
+#define ETH_TYPE_IPV4         0x0800
+#define ETH_TYPE_IPV6         0x86DD
+#define ETH_TYPE_PTP          0x88F7
+#define IP_PROTO_UDP          17
+#define PTP_EVENT_PORT        319
+#define PTP_GENERAL_PORT      320
+
+/* PTP message flag bits */
+#define PTP_FLAG_TWO_STEP     (1 << 9)  /* Bit 1 of flagField (byte 6-7, big-endian) */
 
 static esp_err_t dm9058_ptp_try_lock(esp_eth_ptp_dm9058_t *ptp, bool *locked)
 {
@@ -292,6 +309,227 @@ esp_err_t esp_eth_ptp_dm9058_get_tx_timestamp(esp_eth_ptp_dm9058_t *ptp, esp_eth
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPTSM, 0x01), err, "dm9058.ptp", "set tx timestamp mode failed");
     ESP_GOTO_ON_ERROR(dm9058_ptp_read_bytes(ptp, DM9058_PTPTS, raw, sizeof(raw)), err, "dm9058.ptp", "read tx timestamp failed");
     dm9058_ptp_decode_time(raw, time);
+
+err:
+    dm9058_ptp_unlock_if_needed(ptp, locked);
+    return ret;
+}
+
+esp_err_t esp_eth_ptp_dm9058_set_tx_mode(esp_eth_ptp_dm9058_t *ptp, esp_eth_ptp_dm9058_tx_mode_t mode)
+{
+    ESP_RETURN_ON_FALSE(ptp != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+    ESP_RETURN_ON_FALSE(ptp->initialized && ptp->enabled, ESP_ERR_INVALID_STATE, "dm9058.ptp", "ptp not enabled");
+
+    esp_err_t ret = ESP_OK;
+    bool locked = false;
+    uint8_t tx_mode_val = (mode == ESP_ETH_PTP_DM9058_TX_MODE_ONE_STEP) ? 0x01 : 0x00;
+    uint8_t tcr_val = 0;
+
+    ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, "dm9058.ptp", "lock timeout");
+
+    /* Set PTPTX register (0x63) for hardware one-step mode */
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPTX, tx_mode_val), err, "dm9058.ptp", "set tx mode failed");
+
+    /* Set TCR register (0x02) bit 6 for one-step timestamp insertion control */
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_TCR, &tcr_val), err, "dm9058.ptp", "read tcr failed");
+    if (mode == ESP_ETH_PTP_DM9058_TX_MODE_ONE_STEP) {
+        tcr_val |= DM9058_TCR_TS1STEP_EMIT;
+    } else {
+        tcr_val &= ~DM9058_TCR_TS1STEP_EMIT;
+    }
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_TCR, tcr_val), err, "dm9058.ptp", "write tcr failed");
+
+err:
+    dm9058_ptp_unlock_if_needed(ptp, locked);
+    return ret;
+}
+
+esp_err_t esp_eth_ptp_dm9058_enable_tx_timestamp(esp_eth_ptp_dm9058_t *ptp, bool enable)
+{
+    ESP_RETURN_ON_FALSE(ptp != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+    ESP_RETURN_ON_FALSE(ptp->initialized && ptp->enabled, ESP_ERR_INVALID_STATE, "dm9058.ptp", "ptp not enabled");
+
+    esp_err_t ret = ESP_OK;
+    bool locked = false;
+    uint8_t tcr_val = 0;
+
+    ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, "dm9058.ptp", "lock timeout");
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_TCR, &tcr_val), err, "dm9058.ptp", "read tcr failed");
+
+    if (enable) {
+        tcr_val |= DM9058_TCR_TSEN_CAP;
+    } else {
+        tcr_val &= ~DM9058_TCR_TSEN_CAP;
+    }
+
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_TCR, tcr_val), err, "dm9058.ptp", "write tcr failed");
+
+err:
+    dm9058_ptp_unlock_if_needed(ptp, locked);
+    return ret;
+}
+
+/**
+ * @brief Helper function to check if packet is valid PTP
+ */
+static bool is_valid_ptp_packet(const uint8_t *packet, size_t len)
+{
+    if (len < ETH_HLEN + 2) {
+        return false;
+    }
+
+    /* Check EtherType */
+    uint16_t ethertype = ((uint16_t)packet[12] << 8) | packet[13];
+
+    /* Layer 2 PTP (EtherType 0x88F7) */
+    if (ethertype == ETH_TYPE_PTP) {
+        return len >= ETH_HLEN + 34;  /* Ethernet + PTP header */
+    }
+
+    /* Layer 3/4 PTP over IPv4 UDP */
+    if (ethertype == ETH_TYPE_IPV4 && len >= ETH_HLEN + 20 + 8 + 34) {
+        uint8_t protocol = packet[ETH_HLEN + 9];
+        if (protocol == IP_PROTO_UDP) {
+            /* Check UDP destination port (319 or 320) */
+            uint16_t dest_port = ((uint16_t)packet[ETH_HLEN + 20 + 2] << 8) | packet[ETH_HLEN + 20 + 3];
+            return (dest_port == PTP_EVENT_PORT || dest_port == PTP_GENERAL_PORT);
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @brief Get PTP header offset and message type
+ */
+static bool get_ptp_info(const uint8_t *packet, size_t len, uint8_t *msg_type, bool *two_step_flag)
+{
+    if (!is_valid_ptp_packet(packet, len)) {
+        return false;
+    }
+
+    uint16_t ethertype = ((uint16_t)packet[12] << 8) | packet[13];
+    const uint8_t *ptp_hdr;
+
+    if (ethertype == ETH_TYPE_PTP) {
+        /* Layer 2 PTP */
+        ptp_hdr = packet + ETH_HLEN;
+    } else if (ethertype == ETH_TYPE_IPV4) {
+        /* Layer 3/4 PTP over IPv4 */
+        ptp_hdr = packet + ETH_HLEN + 20 + 8;  /* Skip Ethernet + IP + UDP */
+    } else {
+        return false;
+    }
+
+    /* PTP header format:
+     * Byte 0: messageType (bits 0-3) and transportSpecific (bits 4-7)
+     * Byte 1: reserved and messageLength
+     * Bytes 6-7: flagField (big-endian)
+     */
+    *msg_type = ptp_hdr[0] & 0x0F;
+
+    /* Check two-step flag (bit 1 of flagField, which is bit 9 overall) */
+    uint16_t flags = ((uint16_t)ptp_hdr[6] << 8) | ptp_hdr[7];
+    *two_step_flag = (flags & PTP_FLAG_TWO_STEP) != 0;
+
+    return true;
+}
+
+esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, bool two_step_mode,
+                                               esp_eth_ptp_dm9058_tx_config_t *config)
+{
+    ESP_RETURN_ON_FALSE(packet != NULL && config != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+
+    /* Default: no special handling */
+    config->enable_timestamp_capture = false;
+    config->enable_onestep_insert = false;
+
+    uint8_t msg_type;
+    bool pkt_two_step_flag;
+
+    if (!get_ptp_info(packet, len, &msg_type, &pkt_two_step_flag)) {
+        /* Not a PTP packet, no timestamp needed */
+        return ESP_OK;
+    }
+
+    /* Decision logic based on message type and mode:
+     *
+     * SYNC packet:
+     *   - If one-step mode (!two_step_mode): enable one-step insert
+     *   - If two-step mode: enable timestamp capture
+     *
+     * DELAY_REQ, PDELAY_REQ, PDELAY_RESP:
+     *   - Always enable timestamp capture
+     *   - For DELAY_REQ, optionally enable one-step insert
+     */
+
+    switch (msg_type) {
+    case ESP_ETH_PTP_DM9058_MSG_SYNC:
+        if (!two_step_mode) {
+            /* One-step SYNC: hardware inserts timestamp */
+            config->enable_onestep_insert = true;
+        } else {
+            /* Two-step SYNC: capture timestamp for Follow_Up */
+            config->enable_timestamp_capture = true;
+        }
+        break;
+
+    case ESP_ETH_PTP_DM9058_MSG_DELAY_REQ:
+        config->enable_timestamp_capture = true;
+        /* Optionally enable one-step for slave */
+        config->enable_onestep_insert = true;
+        break;
+
+    case ESP_ETH_PTP_DM9058_MSG_PDELAY_REQ:
+    case ESP_ETH_PTP_DM9058_MSG_PDELAY_RESP:
+        /* P2P delay packets need timestamp capture */
+        config->enable_timestamp_capture = true;
+        break;
+
+    default:
+        /* Other message types (FOLLOW_UP, DELAY_RESP, ANNOUNCE, etc.)
+         * don't need timestamp */
+        break;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet,
+                                          size_t len, bool two_step_mode)
+{
+    ESP_RETURN_ON_FALSE(ptp != NULL && packet != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+    ESP_RETURN_ON_FALSE(ptp->initialized && ptp->enabled, ESP_ERR_INVALID_STATE, "dm9058.ptp", "ptp not enabled");
+
+    esp_err_t ret = ESP_OK;
+    bool locked = false;
+    esp_eth_ptp_dm9058_tx_config_t tx_config;
+    uint8_t tcr_val = 0;
+
+    /* Parse packet to determine TX configuration */
+    ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_tx_packet(packet, len, two_step_mode, &tx_config),
+                        \"dm9058.ptp\", \"parse packet failed\");
+
+    ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, \"dm9058.ptp\", \"lock timeout\");
+
+    /* Read current TCR value */
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_TCR, &tcr_val), err, \"dm9058.ptp\", \"read tcr failed\");
+
+    /* Configure TCR bits based on packet analysis */
+    if (tx_config.enable_timestamp_capture) {
+        tcr_val |= DM9058_TCR_TSEN_CAP;
+    } else {
+        tcr_val &= ~DM9058_TCR_TSEN_CAP;
+    }
+
+    if (tx_config.enable_onestep_insert) {
+        tcr_val |= DM9058_TCR_TS1STEP_EMIT;
+    } else {
+        tcr_val &= ~DM9058_TCR_TS1STEP_EMIT;
+    }
+
+    /* Write updated TCR value */
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_TCR, tcr_val), err, \"dm9058.ptp\", \"write tcr failed\");
 
 err:
     dm9058_ptp_unlock_if_needed(ptp, locked);
