@@ -3,6 +3,8 @@
 #include "esp_eth_ptp_dm9058.h"
 
 /* DM9058 PTP registers */
+#define DM9058_NSR   (0x01)
+#define DM9058_MRCMDX (0x70)
 #define DM9058_PTPCR  (0x60)
 #define DM9058_PTPCW  (0x61)
 #define DM9058_PTPTSM (0x62)
@@ -40,6 +42,24 @@
 
 /* PTP message flag bits */
 #define PTP_FLAG_TWO_STEP     (1 << 9)  /* Bit 1 of flagField (byte 6-7, big-endian) */
+
+/* RX status bits used in DM9058 RX 4-byte header */
+#define DM9058_RSR_RF         (1 << 7)
+#define DM9058_RSR_MF         (1 << 6)
+#define DM9058_RSR_LCS        (1 << 5)
+#define DM9058_RSR_RWTO       (1 << 4)
+#define DM9058_RSR_PLE        (1 << 3)
+#define DM9058_RSR_AE         (1 << 2)
+#define DM9058_RSR_CE         (1 << 1)
+#define DM9058_RSR_FOE        (1 << 0)
+
+#define DM9058_RSR_RXTS_EN    (1 << 5)
+#define DM9058_RSR_RXTS_PARITY (1 << 3)
+#define DM9058_RSR_RXTS_LEN   (1 << 2)
+#define DM9058_RSR_PTP_BITS   (DM9058_RSR_RXTS_EN | DM9058_RSR_RXTS_PARITY | DM9058_RSR_RXTS_LEN)
+#define DM9058_RSR_ERR_BITS   (DM9058_RSR_RF | DM9058_RSR_LCS | DM9058_RSR_RWTO | DM9058_RSR_PLE | DM9058_RSR_AE | DM9058_RSR_CE | DM9058_RSR_FOE)
+
+#define DM9058_NSR_RXRDY      (1 << 0)
 
 static esp_err_t dm9058_ptp_try_lock(esp_eth_ptp_dm9058_t *ptp, bool *locked)
 {
@@ -534,6 +554,113 @@ esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t
 err:
     dm9058_ptp_unlock_if_needed(ptp, locked);
     return ret;
+}
+
+esp_err_t esp_eth_ptp_dm9058_rx_ready(esp_eth_ptp_dm9058_t *ptp, bool *ready)
+{
+    ESP_RETURN_ON_FALSE(ptp != NULL && ready != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+    ESP_RETURN_ON_FALSE(ptp->initialized, ESP_ERR_INVALID_STATE, "dm9058.ptp", "ptp not initialized");
+
+    esp_err_t ret = ESP_OK;
+    bool locked = false;
+    uint8_t nsr = 0;
+    uint8_t rx_flag = 0;
+
+    ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, "dm9058.ptp", "lock timeout");
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_NSR, &nsr), err, "dm9058.ptp", "read nsr failed");
+
+    if ((nsr & DM9058_NSR_RXRDY) == 0) {
+        *ready = false;
+        goto err;
+    }
+
+    /* Follow cspi_read_rxb flow:
+     * - 先讀一次 DM9058_MRCMDX（dummy）
+     * - 再讀一次 DM9058_MRCMDX（有效值）
+     */
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_MRCMDX, &rx_flag), err, "dm9058.ptp", "dummy read MRCMDX failed");
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_MRCMDX, &rx_flag), err, "dm9058.ptp", "read MRCMDX failed");
+
+    if (rx_flag != 0x01) {
+        *ready = false;
+        ret = ESP_ERR_INVALID_RESPONSE;
+        goto err;
+    }
+
+    *ready = true;
+
+err:
+    dm9058_ptp_unlock_if_needed(ptp, locked);
+    return ret;
+}
+
+esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx_header_len,
+                                             uint16_t max_packet_len, esp_eth_ptp_dm9058_rx_info_t *info)
+{
+    ESP_RETURN_ON_FALSE(rx_header != NULL && info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+    ESP_RETURN_ON_FALSE(rx_header_len >= 4, ESP_ERR_INVALID_ARG, "dm9058.ptp", "rx header must be 4 bytes");
+
+    uint8_t rx_status = rx_header[1];
+    uint16_t packet_len = (uint16_t)rx_header[2] | ((uint16_t)rx_header[3] << 8);
+
+    ESP_RETURN_ON_FALSE((rx_status & (DM9058_RSR_ERR_BITS & ~DM9058_RSR_PTP_BITS)) == 0,
+                        ESP_ERR_INVALID_RESPONSE, "dm9058.ptp", "rx status error");
+    ESP_RETURN_ON_FALSE(packet_len <= max_packet_len, ESP_ERR_INVALID_SIZE, "dm9058.ptp", "rx length too large");
+
+    info->packet_len = packet_len;
+    info->rx_status = rx_status;
+    info->timestamp_available = (rx_status & DM9058_RSR_RXTS_EN) != 0;
+    info->timestamp_len = 0;
+
+    if (info->timestamp_available) {
+        info->timestamp_len = (rx_status & DM9058_RSR_RXTS_LEN) ? 8 : 4;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t esp_eth_ptp_dm9058_parse_rx_packet(esp_eth_ptp_dm9058_t *ptp,
+                                             const uint8_t *rx_header, size_t rx_header_len,
+                                             const uint8_t *rx_ts_buffer, size_t rx_ts_buffer_len,
+                                             uint16_t max_packet_len, esp_eth_ptp_dm9058_rx_info_t *info,
+                                             esp_eth_ptp_dm9058_time_t *time)
+{
+    ESP_RETURN_ON_FALSE(ptp != NULL && info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+
+    /* Check if RX data is ready (similar to dm9058_rx_ptp checking cspi_rx_ready) */
+    bool ready = false;
+    ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_rx_ready(ptp, &ready), "dm9058.ptp", "rx ready check failed");
+
+    if (!ready) {
+        /* No data available, set packet_len to 0 (similar to dm9058_rx_ptp returning 0) */
+        memset(info, 0, sizeof(*info));
+        if (time != NULL) {
+            memset(time, 0, sizeof(*time));
+        }
+        return ESP_OK;
+    }
+
+    /* Parse RX header */
+    ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_rx_header(rx_header, rx_header_len, max_packet_len, info),
+                        "dm9058.ptp", "parse rx header failed");
+
+    if (!info->timestamp_available) {
+        if (time != NULL) {
+            memset(time, 0, sizeof(*time));
+        }
+        return ESP_OK;
+    }
+
+    ESP_RETURN_ON_FALSE(rx_ts_buffer != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "missing rx timestamp buffer");
+    ESP_RETURN_ON_FALSE(rx_ts_buffer_len >= info->timestamp_len, ESP_ERR_INVALID_SIZE,
+                        "dm9058.ptp", "rx timestamp buffer too small");
+
+    if (time != NULL) {
+        ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_rx_timestamp(rx_ts_buffer, info->timestamp_len, time),
+                            "dm9058.ptp", "decode rx timestamp failed");
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t esp_eth_ptp_dm9058_tx_timestamp(esp_eth_ptp_dm9058_t *ptp, esp_eth_ptp_dm9058_time_t *time)
