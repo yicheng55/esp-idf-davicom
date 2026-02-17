@@ -515,8 +515,8 @@ esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, 
     return ESP_OK;
 }
 
-esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet,
-                                          size_t len, bool two_step_mode)
+static esp_err_t esp_eth_ptp_dm9058_prepare_tx_internal(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet,
+                                                        size_t len, bool two_step_mode, bool take_lock)
 {
     ESP_RETURN_ON_FALSE(ptp != NULL && packet != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
     ESP_RETURN_ON_FALSE(ptp->initialized && ptp->enabled, ESP_ERR_INVALID_STATE, "dm9058.ptp", "ptp not enabled");
@@ -530,7 +530,9 @@ esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t
     ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_tx_packet(packet, len, two_step_mode, &tx_config),
                         \"dm9058.ptp\", \"parse packet failed\");
 
-    ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, \"dm9058.ptp\", \"lock timeout\");
+    if (take_lock) {
+        ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, \"dm9058.ptp\", \"lock timeout\");
+    }
 
     /* Read current TCR value */
     ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_TCR, &tcr_val), err, \"dm9058.ptp\", \"read tcr failed\");
@@ -554,6 +556,18 @@ esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t
 err:
     dm9058_ptp_unlock_if_needed(ptp, locked);
     return ret;
+}
+
+esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet,
+                                        size_t len, bool two_step_mode)
+{
+    return esp_eth_ptp_dm9058_prepare_tx_internal(ptp, packet, len, two_step_mode, true);
+}
+
+esp_err_t esp_eth_ptp_dm9058_prepare_tx_locked(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet,
+                                               size_t len, bool two_step_mode)
+{
+    return esp_eth_ptp_dm9058_prepare_tx_internal(ptp, packet, len, two_step_mode, false);
 }
 
 esp_err_t esp_eth_ptp_dm9058_rx_ready(esp_eth_ptp_dm9058_t *ptp, bool *ready)

@@ -76,6 +76,7 @@ esp_err_t esp_eth_ptp_dm9058_set_tx_mode(esp_eth_ptp_dm9058_t *ptp, esp_eth_ptp_
 esp_err_t esp_eth_ptp_dm9058_enable_tx_timestamp(esp_eth_ptp_dm9058_t *ptp, bool enable);
 esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, bool two_step_mode, esp_eth_ptp_dm9058_tx_config_t *config);
 esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet, size_t len, bool two_step_mode);
+esp_err_t esp_eth_ptp_dm9058_prepare_tx_locked(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet, size_t len, bool two_step_mode);
 
 /* RX ready check follows cspi_read_rxb flow:
  * 1) Read DM9058_MRCMDX once as dummy read

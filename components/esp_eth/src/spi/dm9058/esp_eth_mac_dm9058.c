@@ -862,6 +862,7 @@ static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_
     const uint32_t tx_pointer_timeout_us = 500;
     const uint32_t tx_complete_timeout_us = 500;
     esp_err_t ret = ESP_OK;
+    bool tx_locked = false;
     esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
 
     ESP_GOTO_ON_FALSE(buf != NULL, ESP_ERR_INVALID_ARG, err, TAG, "tx buffer is null");
@@ -871,9 +872,12 @@ static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_
     /* Step 1: wait TX pointer ready (similar to tx_pointer_timeout flow) */
     ESP_GOTO_ON_ERROR(DM9058_wait_tx_pointer(emac, tx_pointer_timeout_us), err, TAG, "wait tx pointer failed");
 
+    ESP_GOTO_ON_FALSE(DM9058_mutex_lock(emac), ESP_ERR_TIMEOUT, err, TAG, "multiple register access mutex timeout");
+    tx_locked = true;
+
     /* Step 2: PTP packet parse/configure (similar to ptp_tx_tstamp_parse_packet flow) */
     if (emac->ptp_auto_process && emac->ptp.enabled) {
-        esp_err_t ptp_ret = esp_eth_ptp_dm9058_prepare_tx(&emac->ptp, buf, length, emac->ptp_two_step_mode);
+        esp_err_t ptp_ret = esp_eth_ptp_dm9058_prepare_tx_locked(&emac->ptp, buf, length, emac->ptp_two_step_mode);
         if (ptp_ret != ESP_OK) {
             ESP_LOGW(TAG, "prepare tx ptp failed: %s", esp_err_to_name(ptp_ret));
         }
@@ -889,6 +893,9 @@ static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_
     /* Step 4: explicit TX request trigger (equivalent to HAL_write_reg(DM9058_TCR, tcr_wr)) */
     ESP_GOTO_ON_ERROR(DM9058_trigger_tx_request(emac), err, TAG, "trigger tx request failed");
 
+    DM9058_mutex_unlock(emac);
+    tx_locked = false;
+
     /* Step 5: wait tx complete (similar to tx_compl_timeout flow) */
     if (emac->ptp_auto_process && emac->ptp.enabled) {
         esp_err_t wait_ret = DM9058_wait_tx_complete(emac, tx_complete_timeout_us);
@@ -899,6 +906,9 @@ static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_
 
     return ESP_OK;
 err:
+    if (tx_locked) {
+        DM9058_mutex_unlock(emac);
+    }
     return ret;
 }
 
