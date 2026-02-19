@@ -12,14 +12,44 @@
 #include "ethernet_init.h"
 #include "esp_vfs_l2tap.h"
 #include "driver/gpio.h"
+#include "freertos/event_groups.h"
 #include "ptpd.h"
 
 #include "esp_eth_time.h"
 
 static const char *TAG = "ptp_example";
 
+#define ETH_CONNECTED_BIT BIT0
+
+static EventGroupHandle_t s_eth_event_group;
+
 static struct timespec s_next_time;
 static bool s_gpio_level;
+static esp_eth_handle_t *s_eth_handles;
+static uint8_t s_eth_port_cnt;
+
+static void eth_event_handler(void *arg, esp_event_base_t event_base,
+                              int32_t event_id, void *event_data)
+{
+    if (event_base == ETH_EVENT) {
+        switch (event_id) {
+        case ETHERNET_EVENT_CONNECTED:
+            if (s_eth_event_group) {
+                xEventGroupSetBits(s_eth_event_group, ETH_CONNECTED_BIT);
+            }
+            ESP_LOGI(TAG, "Ethernet Link Up");
+            break;
+        case ETHERNET_EVENT_DISCONNECTED:
+            if (s_eth_event_group) {
+                xEventGroupClearBits(s_eth_event_group, ETH_CONNECTED_BIT);
+            }
+            ESP_LOGW(TAG, "Ethernet Link Down");
+            break;
+        default:
+            break;
+        }
+    }
+}
 
 void init_ethernet_and_netif(void)
 {
@@ -28,7 +58,12 @@ void init_ethernet_and_netif(void)
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    s_eth_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
+
     ESP_ERROR_CHECK(example_eth_init(&eth_handles, &eth_port_cnt));
+    s_eth_handles = eth_handles;
+    s_eth_port_cnt = eth_port_cnt;
 
     ESP_ERROR_CHECK(esp_netif_init());
 
@@ -57,6 +92,10 @@ void init_ethernet_and_netif(void)
 
     for (int i = 0; i < eth_port_cnt; i++) {
         ESP_ERROR_CHECK(esp_eth_start(eth_handles[i]));
+    }
+    EventBits_t bits = xEventGroupWaitBits(s_eth_event_group, ETH_CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+    if ((bits & ETH_CONNECTED_BIT) == 0) {
+        ESP_LOGW(TAG, "Ethernet Link Up timeout");
     }
 }
 
@@ -89,9 +128,14 @@ void app_main(void)
 
     struct timespec cur_time;
     // wait for the clock to be available
+    ESP_LOGI(TAG, "init.s curr time: %llu.%09lu", cur_time.tv_sec, cur_time.tv_nsec);
+
     while (esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &cur_time) == -1) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+
+    ESP_LOGI(TAG, "init.e curr time: %llu.%09lu", cur_time.tv_sec, cur_time.tv_nsec);
+
     // register callback function which will toggle output pin
     esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
 
