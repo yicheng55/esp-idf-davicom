@@ -129,6 +129,12 @@ menu "Example Ethernet Configuration"
                 help
                     Select external SPI-Ethernet module (DM9051).
 
+            config EXAMPLE_USE_DM9058
+                bool "DM9058 Module"
+                select ETH_SPI_ETHERNET_DM9058
+                help
+                    Select external SPI-Ethernet module (DM9058).
+
             config EXAMPLE_USE_KSZ8851SNL
                 bool "KSZ8851SNL Module"
                 select ETH_SPI_ETHERNET_KSZ8851SNL

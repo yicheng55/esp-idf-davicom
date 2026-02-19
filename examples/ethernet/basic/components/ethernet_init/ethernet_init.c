@@ -206,6 +206,12 @@ static esp_eth_handle_t eth_init_spi(spi_eth_module_config_t *spi_eth_module_con
     dm9051_config.poll_period_ms = spi_eth_module_config->polling_ms;
     esp_eth_mac_t *mac = esp_eth_mac_new_dm9051(&dm9051_config, &mac_config);
     esp_eth_phy_t *phy = esp_eth_phy_new_dm9051(&phy_config);
+#elif CONFIG_EXAMPLE_USE_DM9058
+    eth_dm9058_config_t dm9058_config = ETH_DM9058_DEFAULT_CONFIG(CONFIG_EXAMPLE_ETH_SPI_HOST, &spi_devcfg);
+    dm9058_config.int_gpio_num = spi_eth_module_config->int_gpio;
+    dm9058_config.poll_period_ms = spi_eth_module_config->polling_ms;
+    esp_eth_mac_t *mac = esp_eth_mac_new_dm9058(&dm9058_config, &mac_config);
+    esp_eth_phy_t *phy = esp_eth_phy_new_dm9058(&phy_config);
 #elif CONFIG_EXAMPLE_USE_W5500
     eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(CONFIG_EXAMPLE_ETH_SPI_HOST, &spi_devcfg);
     w5500_config.int_gpio_num = spi_eth_module_config->int_gpio;

@@ -26,6 +26,19 @@ See common pin assignments for Ethernet examples from [upper level](../README.md
 
 ### Configure the project
 
+(Optional) Example configuration is available in the [sdkconfig.defaults](sdkconfig.defaults) file. You can copy this file to the project root and rename it to ``sdkconfig`` to use the default configuration.
+Set up the Python environment and ESP-IDF tools by running the export script:
+PS D:\prg\esp-idf\esp-idf-davicom\examples\ethernet\ptp> & "D:\prg\esp-idf\esp-idf-davicom\export.ps1"
+idf.py set-target esp32s3
+
+目前可用流程（每次新開終端先跑一次）：
+& D:\prg\esp-idf\esp-idf-davicom\export.ps1
+Set-Location D:\prg\esp-idf\esp-idf-davicom\examples\ethernet\ptp
+idf.py set-target esp32s3
+idf.py build
+若要燒錄：
+idf.py -p COMx flash monitor
+
 Run the:
 
 ```
@@ -61,7 +74,7 @@ I (10107) ptpd: Got announce packet, seq 3120
 
 I (10107) ptpd: Switching to better PTP time source
 
-I (10107) gpio: GPIO[20]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 
+I (10107) gpio: GPIO[20]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
 I (10107) ptpd: Got sync packet, seq 31198
 
 I (10127) ptpd: Waiting for follow-up
