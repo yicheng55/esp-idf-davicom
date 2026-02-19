@@ -8,12 +8,25 @@
 
 #include <sys/time.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "esp_err.h"
 #include "esp_eth_driver.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Type of callback function invoked under Time Stamp target time exceeded interrupt
+ *
+ * @param eth: mediator of Ethernet driver
+ * @param user_args user specific arguments
+ *
+ * @return
+ *          - TRUE when high priority task has been woken by this function
+ *          - FALSE no high priority task was woken by this function
+ */
+typedef bool (*ts_target_exceed_cb_from_isr_t)(esp_eth_mediator_t *eth, void *user_args);
 
 #define CLOCK_PTP_SYSTEM         ((clockid_t) 19)
 

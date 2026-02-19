@@ -167,6 +167,37 @@ typedef struct {
 } eth_dm9058_config_t;
 
 /**
+ * @brief List of DM9058 specific commands for ioctl API
+ */
+typedef enum {
+    ETH_MAC_DM9058_CMD_PTP_ENABLE = ETH_CMD_CUSTOM_MAC_CMDS_OFFSET, /*!< Enable IEEE1588 timestamping in DM9058 */
+    ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS,                             /*!< Enable/disable automatic TX/RX PTP processing in MAC driver */
+    ETH_MAC_DM9058_CMD_S_PTP_TIME,                                   /*!< Set PTP time in DM9058 */
+    ETH_MAC_DM9058_CMD_G_PTP_TIME,                                   /*!< Get PTP time from DM9058 */
+    ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ,                                 /*!< Adjust PTP frequency by ppb value */
+    ETH_MAC_DM9058_CMD_ADJ_PTP_TIME,                                 /*!< Adjust PTP time by signed offset */
+    ETH_MAC_DM9058_CMD_G_PTP_TX_TIME,                                /*!< Get last TX timestamp from DM9058 */
+    ETH_MAC_DM9058_CMD_G_PTP_RX_TIME,                                /*!< Get last RX timestamp from DM9058 */
+    ETH_MAC_DM9058_CMD_S_TARGET_TIME,                                /*!< Set Target Time at which interrupt is invoked when PTP time exceeds this value*/
+    ETH_MAC_DM9058_CMD_S_TARGET_CB                                   /*!< Set pointer to a callback function invoked when PTP time exceeds Target Time */
+} eth_mac_dm9058_io_cmd_t;
+
+/**
+ * @brief Generic ETH MAC command aliases for DM9058
+ * These allow using generic ETH_MAC_ESP_CMD_* names with DM9058
+ */
+#define ETH_MAC_ESP_CMD_PTP_ENABLE      ETH_MAC_DM9058_CMD_PTP_ENABLE
+#define ETH_MAC_ESP_CMD_PTP_AUTO_PROCESS ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS
+#define ETH_MAC_ESP_CMD_S_PTP_TIME      ETH_MAC_DM9058_CMD_S_PTP_TIME
+#define ETH_MAC_ESP_CMD_G_PTP_TIME      ETH_MAC_DM9058_CMD_G_PTP_TIME
+#define ETH_MAC_ESP_CMD_ADJ_PTP_FREQ    ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ
+#define ETH_MAC_ESP_CMD_ADJ_PTP_TIME    ETH_MAC_DM9058_CMD_ADJ_PTP_TIME
+#define ETH_MAC_ESP_CMD_G_PTP_TX_TIME   ETH_MAC_DM9058_CMD_G_PTP_TX_TIME
+#define ETH_MAC_ESP_CMD_G_PTP_RX_TIME   ETH_MAC_DM9058_CMD_G_PTP_RX_TIME
+#define ETH_MAC_ESP_CMD_S_TARGET_TIME   ETH_MAC_DM9058_CMD_S_TARGET_TIME
+#define ETH_MAC_ESP_CMD_S_TARGET_CB     ETH_MAC_DM9058_CMD_S_TARGET_CB
+
+/**
  * @brief Default DM9058 specific configuration
  *
  */

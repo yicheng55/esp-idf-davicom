@@ -36,6 +36,16 @@ idf.py set-target esp32s3
 Set-Location D:\prg\esp-idf\esp-idf-davicom\examples\ethernet\ptp
 idf.py set-target esp32s3
 idf.py build
+
+
+or
+ESP-IDF 環境設定：
+c:\esp\v5.5.2\esp-idf\export.ps1
+Set-Location c:\esp\v5.5.2\esp-idf\examples\ethernet\ptp
+idf.py menuconfig
+idf.py set-target esp32s3
+idf.py build
+
 若要燒錄：
 idf.py -p COMx flash monitor
 
