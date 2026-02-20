@@ -528,14 +528,14 @@ static esp_err_t esp_eth_ptp_dm9058_prepare_tx_internal(esp_eth_ptp_dm9058_t *pt
 
     /* Parse packet to determine TX configuration */
     ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_tx_packet(packet, len, two_step_mode, &tx_config),
-                        \"dm9058.ptp\", \"parse packet failed\");
+                        "dm9058.ptp", "parse packet failed");
 
     if (take_lock) {
-        ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, \"dm9058.ptp\", \"lock timeout\");
+        ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, "dm9058.ptp", "lock timeout");
     }
 
     /* Read current TCR value */
-    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_TCR, &tcr_val), err, \"dm9058.ptp\", \"read tcr failed\");
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_read(ptp->io_ctx, DM9058_TCR, &tcr_val), err, "dm9058.ptp", "read tcr failed");
 
     /* Configure TCR bits based on packet analysis */
     if (tx_config.enable_timestamp_capture) {
@@ -551,7 +551,7 @@ static esp_err_t esp_eth_ptp_dm9058_prepare_tx_internal(esp_eth_ptp_dm9058_t *pt
     }
 
     /* Write updated TCR value */
-    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_TCR, tcr_val), err, \"dm9058.ptp\", \"write tcr failed\");
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_TCR, tcr_val), err, "dm9058.ptp", "write tcr failed");
 
 err:
     dm9058_ptp_unlock_if_needed(ptp, locked);
