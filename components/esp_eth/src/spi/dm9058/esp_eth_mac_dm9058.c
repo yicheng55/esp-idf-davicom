@@ -32,6 +32,9 @@
 #include "esp_eth_ptp_dm9058.h"
 
 static const char *TAG = "dm9058.mac";
+static const char *PTP_TAG = "dm9051.ptp";
+
+typedef bool (*dm9051_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 
 #define DM9058_SPI_LOCK_TIMEOUT_MS      (50)
 #define DM9058_PHY_OPERATION_TIMEOUT_US (1000)
@@ -79,6 +82,11 @@ typedef struct {
     bool flow_ctrl_enabled;
     uint8_t *rx_buffer;
     uint8_t hash_filter_cnt[DM9058_HASH_FILTER_TABLE_SIZE];
+    dm9051_ts_target_cb_t ts_target_exceed_cb_from_isr;
+	eth_mac_time_t *target_time;
+    bool target_time_valid;
+    esp_timer_handle_t ptp_timer;
+    bool ptp_timer_started;
     esp_eth_ptp_dm9058_t ptp;
     bool ptp_auto_process;
     bool ptp_two_step_mode;
@@ -143,6 +151,26 @@ static inline bool DM9058_spi_lock(eth_spi_info_t *spi)
 static inline bool DM9058_spi_unlock(eth_spi_info_t *spi)
 {
     return xSemaphoreGive(spi->lock) == pdTRUE;
+}
+
+static void dm9051_ptp_timer_start(esp32_DM9058_t *emac)
+{
+    if (!emac->ptp_timer || emac->ptp_timer_started) {
+        return;
+    }
+    if (emac->target_time_valid && emac->ts_target_exceed_cb_from_isr) {
+        if (esp_timer_start_periodic(emac->ptp_timer, 1000000) == ESP_OK) { // 1 second
+            emac->ptp_timer_started = true;
+        }
+    }
+}
+
+static void dm9051_ptp_timer_stop(esp32_DM9058_t *emac)
+{
+    if (emac->ptp_timer && emac->ptp_timer_started) {
+        esp_timer_stop(emac->ptp_timer);
+        emac->ptp_timer_started = false;
+    }
 }
 
 static esp_err_t DM9058_spi_write(void *spi_ctx, uint32_t cmd, uint32_t addr, const void *value, uint32_t len)
@@ -803,10 +831,31 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         // Target time not yet supported in DM9058
         ESP_LOGW(TAG, "Target time feature not yet implemented for DM9058");
         return ESP_ERR_NOT_SUPPORTED;
+//        ESP_RETURN_ON_FALSE(data, ESP_ERR_INVALID_ARG, PTP_TAG, "PTP set target time invalid argument, cant' be NULL");
+//        emac->target_time = *(eth_mac_time_t *)data;
+//        emac->target_time_valid = true;
+//        if (DM9058_mutex_lock(emac)) {
+//            eth_mac_time_t now = {0};
+//            dm9051_ptp_get_time(emac, &now);
+//            dm9051_mutex_unlock(emac);
+//            if (dm9051_time_reached(&now, &emac->target_time)) {
+//                emac->target_time_valid = false;
+//                if (emac->ts_target_exceed_cb_from_isr) {
+//                    emac->ts_target_exceed_cb_from_isr(emac->eth, NULL);
+//                }
+//                return ESP_OK;
+//            }
+//        }
+//        dm9051_ptp_timer_start(emac);
+//        return ESP_OK;
     case ETH_MAC_DM9058_CMD_S_TARGET_CB:
         // Target callback not yet supported in DM9058
-        ESP_LOGW(TAG, "Target callback feature not yet implemented for DM9058");
-        return ESP_ERR_NOT_SUPPORTED;
+        //ESP_LOGW(TAG, "Target callback feature not yet implemented for DM9058");
+        //return ESP_ERR_NOT_SUPPORTED;
+        ESP_RETURN_ON_FALSE(data, ESP_ERR_INVALID_ARG, PTP_TAG, "PTP set target callback invalid argument, cant' be NULL");
+        emac->ts_target_exceed_cb_from_isr = (dm9051_ts_target_cb_t)data;
+        dm9051_ptp_timer_start(emac);
+        return ESP_OK;
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
