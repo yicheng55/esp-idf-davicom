@@ -124,6 +124,14 @@ void app_main(void)
 {
     init_ethernet_and_netif();
 
+    esp_eth_clock_cfg_t clock_cfg = {
+        .eth_hndl = s_eth_handles[0]
+    };
+    esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clock_cfg);
+
+    // register callback function which will toggle output pin
+    esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
+
     int pid = ptpd_start("ETH_0");
 
     struct timespec cur_time;
@@ -135,9 +143,6 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "init.e curr time: %llu.%09lu", cur_time.tv_sec, cur_time.tv_nsec);
-
-    // register callback function which will toggle output pin
-    esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
 
     // initialize output pin
     gpio_config_t gpio_out_cfg = {

@@ -1,2 +1,191 @@
 (1) repo_stairs2.1 (main develop)
 (2) repo_devel_copy2 (reference NO panic version)
+
+(1) repo_stairs2.1 (main develop) ping on, sync ok, follow-up ok
+
+Effective Change:
+EC emac->parent.transmit_ctrl_vargs = esp32_DM9058_transmit_ctrl_vargs;
+
+Log:
+I (311) main_task: Calling app_main()
+I (341) esp_eth.netif.netif_glue: 12:51:db:80:e1:e8
+I (341) esp_eth.netif.netif_glue: ethernet attached to netif
+I (2241) ptp_example: Ethernet Link Up
+W (2241) dm9051.ptp: case ETH_MAC_DM9058_CMD_S_TARGET_CB of DM9058
+I (2241) ptp_example: init.s curr time: 0.1006912762
+I (2241) ptp_example: init.e curr time: 32.257192440
+I (3251) ptpd: Sent sync + follow-up, seq 1
+
+I (3251) ptp_example: Starting Pulse train
+I (3251) ptp_example: curr time: 33.263878680
+I (3251) ptp_example: next time: 34.500000000
+W (3251) dm9051.ptp: case ETH_MAC_DM9058_CMD_S_TARGET_TIME of DM9058
+E (3311) dm9058.ptp: esp_eth_ptp_dm9058_get_time(216): lock timeout
+I (4261) ptpd: Sent sync + follow-up, seq 2
+
+I (5271) ptpd: Sent sync + follow-up, seq 3
+
+I (5291) esp_netif_handlers: eth0 ip: 192.168.6.3, mask: 255.255.255.0, gw: 192.168.6.1
+I (6281) ptpd: Sent sync + follow-up, seq 4
+
+I (7291) ptpd: Sent sync + follow-up, seq 5
+
+I (8301) ptpd: Sent sync + follow-up, seq 6
+
+I (9311) ptpd: Sent sync + follow-up, seq 7
+
+I (10321) ptpd: Sent announce, seq 1
+
+I (10321) ptpd: Sent sync + follow-up, seq 8
+
+I (11331) ptpd: Sent sync + follow-up, seq 9
+
+I (12341) ptpd: Sent sync + follow-up, seq 10
+
+I (13351) ptpd: Sent sync + follow-up, seq 11
+
+I (14361) ptpd: Sent sync + follow-up, seq 12
+
+I (15371) ptpd: Sent sync + follow-up, seq 13
+
+I (16381) ptpd: Sent sync + follow-up, seq 14
+
+I (17391) ptpd: Sent sync + follow-up, seq 15
+
+I (18401) ptpd: Sent sync + follow-up, seq 16
+
+I (19411) ptpd: Sent sync + follow-up, seq 17
+
+I (20421) ptpd: Sent announce, seq 2
+
+I (20421) ptpd: Sent sync + follow-up, seq 18
+
+I (21431) ptpd: Sent sync + follow-up, seq 19
+
+I (22441) ptpd: Sent sync + follow-up, seq 20
+
+I (23451) ptpd: Sent sync + follow-up, seq 21
+
+I (24461) ptpd: Sent sync + follow-up, seq 22
+
+I (25471) ptpd: Sent sync + follow-up, seq 23
+
+I (26481) ptpd: Sent sync + follow-up, seq 24
+
+I (27491) ptpd: Sent sync + follow-up, seq 25
+
+I (28501) ptpd: Sent sync + follow-up, seq 26
+
+I (29511) ptpd: Sent sync + follow-up, seq 27
+
+I (30521) ptpd: Sent announce, seq 3
+
+I (30521) ptpd: Sent sync + follow-up, seq 28
+
+I (31531) ptpd: Sent sync + follow-up, seq 29
+
+I (32541) ptpd: Sent sync + follow-up, seq 30
+
+I (33551) ptpd: Sent sync + follow-up, seq 31
+
+I (34561) ptpd: Sent sync + follow-up, seq 32
+
+I (35571) ptpd: Sent sync + follow-up, seq 33
+
+I (36581) ptpd: Sent sync + follow-up, seq 34
+
+I (37591) ptpd: Sent sync + follow-up, seq 35
+
+I (38601) ptpd: Sent sync + follow-up, seq 36
+
+I (39611) ptpd: Sent sync + follow-up, seq 37
+
+I (40621) ptpd: Sent announce, seq 4
+
+I (40621) ptpd: Sent sync + follow-up, seq 38
+
+I (41631) ptpd: Sent sync + follow-up, seq 39
+
+I (42641) ptpd: Sent sync + follow-up, seq 40
+
+I (43651) ptpd: Sent sync + follow-up, seq 41
+
+I (44661) ptpd: Sent sync + follow-up, seq 42
+
+I (45671) ptpd: Sent sync + follow-up, seq 43
+
+I (46681) ptpd: Sent sync + follow-up, seq 44
+
+I (47691) ptpd: Sent sync + follow-up, seq 45
+
+I (48701) ptpd: Sent sync + follow-up, seq 46
+
+I (49711) ptpd: Sent sync + follow-up, seq 47
+
+I (50721) ptpd: Sent announce, seq 5
+
+I (50721) ptpd: Sent sync + follow-up, seq 48
+
+I (51731) ptpd: Sent sync + follow-up, seq 49
+
+I (52741) ptpd: Sent sync + follow-up, seq 50
+
+I (53751) ptpd: Sent sync + follow-up, seq 51
+
+I (54761) ptpd: Sent sync + follow-up, seq 52
+
+I (55771) ptpd: Sent sync + follow-up, seq 53
+
+I (56781) ptpd: Sent sync + follow-up, seq 54
+
+I (57791) ptpd: Sent sync + follow-up, seq 55
+
+I (58801) ptpd: Sent sync + follow-up, seq 56
+
+I (59811) ptpd: Sent sync + follow-up, seq 57
+
+I (60821) ptpd: Sent announce, seq 6
+
+I (60821) ptpd: Sent sync + follow-up, seq 58
+
+I (61831) ptpd: Sent sync + follow-up, seq 59
+
+I (62841) ptpd: Sent sync + follow-up, seq 60
+
+I (63851) ptpd: Sent sync + follow-up, seq 61
+
+I (64861) ptpd: Sent sync + follow-up, seq 62
+
+I (65871) ptpd: Sent sync + follow-up, seq 63
+
+I (66881) ptpd: Sent sync + follow-up, seq 64
+
+I (67891) ptpd: Sent sync + follow-up, seq 65
+
+I (68901) ptpd: Sent sync + follow-up, seq 66
+
+I (69911) ptpd: Sent sync + follow-up, seq 67
+
+I (70921) ptpd: Sent announce, seq 7
+
+I (70921) ptpd: Sent sync + follow-up, seq 68
+
+I (71931) ptpd: Sent sync + follow-up, seq 69
+
+I (72941) ptpd: Sent sync + follow-up, seq 70
+
+I (73951) ptpd: Sent sync + follow-up, seq 71
+
+I (74961) ptpd: Sent sync + follow-up, seq 72
+
+I (75971) ptpd: Sent sync + follow-up, seq 73
+
+I (76981) ptpd: Sent sync + follow-up, seq 74
+
+I (77991) ptpd: Sent sync + follow-up, seq 75
+
+I (79001) ptpd: Sent sync + follow-up, seq 76
+
+I (80011) ptpd: Sent sync + follow-up, seq 77
+
+I (81021) ptpd: Sent announce, seq 8
