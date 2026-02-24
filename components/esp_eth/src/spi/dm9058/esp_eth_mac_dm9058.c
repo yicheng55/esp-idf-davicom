@@ -36,6 +36,16 @@ static const char *PTP_TAG = "dm9051.ptp";
 
 typedef bool (*dm9051_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 
+#ifndef DM9058_RX_DEBUG
+#define DM9058_RX_DEBUG 1
+#endif
+
+#if DM9058_RX_DEBUG
+#define DM9058_RX_LOGD(...) ESP_LOGD(TAG, __VA_ARGS__)
+#else
+#define DM9058_RX_LOGD(...)
+#endif
+
 #define DM9058_SPI_LOCK_TIMEOUT_MS      (50)
 #define DM9058_PHY_OPERATION_TIMEOUT_US (1000)
 #define DM9058_MULTI_REG_AXS_TIMEOUT_MS (50)
@@ -1080,20 +1090,31 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
         *size = 0;
         uint8_t reg_nsr = 0;
         ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_NSR, &reg_nsr), err, TAG, "read NSR failed");
+        DM9058_RX_LOGD("rx loop: NSR=0x%02x (RXRDY=%d)", reg_nsr, !!(reg_nsr & NSR_RXRDY));
         if (reg_nsr & NSR_RXRDY) {
             /* dummy read, get the most updated data */
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
+            DM9058_RX_LOGD("rx ready: MRCMDX flag=0x%02x", rxbyte);
             if (0x01 != rxbyte) {
                 ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
                 ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
             }
             ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, (uint8_t *)&header, sizeof(header)), err, TAG, "read rx header failed");
             uint16_t rx_len = header.length_low + (header.length_high << 8);
+            DM9058_RX_LOGD("rx header: flag=0x%02x status=0x%02x len=%u", header.flag, header.status, rx_len);
             /* store the whole frame to preallocated memory */
             if (rx_len <= ETH_MAX_PACKET_SIZE) {
-                ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
                 ESP_GOTO_ON_ERROR(DM9058_handle_rx_ptp_timestamp(emac, &header), err, TAG, "handle rx ptp timestamp failed");
+                ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
+                if (rx_len >= 14) {
+                    DM9058_RX_LOGD("rx eth: dst=%02x:%02x:%02x:%02x:%02x:%02x src=%02x:%02x:%02x:%02x:%02x:%02x type=0x%02x%02x",
+                                   emac->rx_buffer[0], emac->rx_buffer[1], emac->rx_buffer[2],
+                                   emac->rx_buffer[3], emac->rx_buffer[4], emac->rx_buffer[5],
+                                   emac->rx_buffer[6], emac->rx_buffer[7], emac->rx_buffer[8],
+                                   emac->rx_buffer[9], emac->rx_buffer[10], emac->rx_buffer[11],
+                                   emac->rx_buffer[12], emac->rx_buffer[13]);
+                }
             } else {
                 /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
                 ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
@@ -1215,6 +1236,12 @@ static void esp32_DM9058_task(void *arg)
         /* clear interrupt status */
         DM9058_register_read(emac, DM9058_ISR, &status);
         DM9058_register_write(emac, DM9058_ISR, status);
+        DM9058_RX_LOGD("irq: ISR=0x%02x (PR=%d PT=%d ROS=%d) gpio=%d",
+                   status,
+                   !!(status & ISR_PR),
+                   !!(status & ISR_PT),
+                   !!(status & ISR_ROS),
+                   (emac->int_gpio_num >= 0) ? gpio_get_level(emac->int_gpio_num) : -1);
         /* packet received */
         if (status & ISR_PR) {
             do {

@@ -28,6 +28,9 @@
 
 #define ESP_PTP 1
 
+/* Enable DEBUG log level for this component (ptp_process_rx_packet debug) */
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 /****************************************************************************
  * Included Files
  ****************************************************************************/
@@ -360,15 +363,47 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 
   int ret = read(state->ptp_socket, &ptp_msg_ext_buff, 0);
 
+  ESP_LOGD(TAG, "ptp_net_recv: read() returned %d (includes %d byte eth header)", ret, ETH_HEADER_LEN);
+  if (ret < 0)
+    {
+      ESP_LOGE(TAG, "ptp_net_recv: read() failed, errno=%d (%s)", errno, strerror(errno));
+      return ret;
+    }
+  if (ret < ETH_HEADER_LEN)
+    {
+      ESP_LOGE(TAG, "ptp_net_recv: frame too short (%d bytes), ignoring", ret);
+      return -1;
+    }
+
+  /* DEBUG: log Ethernet header info */
+  struct eth_hdr *rx_eth_hdr = (struct eth_hdr *)eth_frame;
+  ESP_LOGD(TAG, "ptp_net_recv: src=%02x:%02x:%02x:%02x:%02x:%02x "
+                "dst=%02x:%02x:%02x:%02x:%02x:%02x ethertype=0x%04x",
+           rx_eth_hdr->src.addr[0], rx_eth_hdr->src.addr[1], rx_eth_hdr->src.addr[2],
+           rx_eth_hdr->src.addr[3], rx_eth_hdr->src.addr[4], rx_eth_hdr->src.addr[5],
+           rx_eth_hdr->dest.addr[0], rx_eth_hdr->dest.addr[1], rx_eth_hdr->dest.addr[2],
+           rx_eth_hdr->dest.addr[3], rx_eth_hdr->dest.addr[4], rx_eth_hdr->dest.addr[5],
+           ntohs(rx_eth_hdr->type));
+
   // check if read was successful, ts exists and ts_info is valid
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
     {
       *ts = *(struct timespec *)ts_info->data;
+      ESP_LOGD(TAG, "ptp_net_recv: RX timestamp sec=%lld nsec=%ld",
+               (long long)ts->tv_sec, ts->tv_nsec);
+    }
+  else if (ret > 0)
+    {
+      ESP_LOGW(TAG, "ptp_net_recv: no RX timestamp (ts=%p, ts_info->type=0x%x)",
+               (void*)ts, ts_info->type);
     }
 
-  memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
+  /* BUG FIX: copy only the PTP payload (ret - ETH_HEADER_LEN bytes), not the full frame */
+  int ptp_len = ret - ETH_HEADER_LEN;
+  memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ptp_len);
 
-  return ret;
+  ESP_LOGD(TAG, "ptp_net_recv: PTP payload len=%d", ptp_len);
+  return ptp_len;
 }
 
 static int64_t timespec_to_ns(FAR const struct timespec *ts)
@@ -644,7 +679,12 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   esp_eth_clock_cfg_t clk_cfg = {
     .eth_hndl = eth_handle,
   };
-  esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
+  esp_err_t err = esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
+  if (err != ESP_OK)
+  {
+    ptperr("esp_eth_clock_init failed: %s\n", esp_err_to_name(err));
+    return ERROR;
+  }
 
   // Enable time stamping in L2TAP
   if(ioctl(state->ptp_socket, L2TAP_S_TIMESTAMP_EN) < 0)
@@ -654,14 +694,29 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   }
 
   // get HW address
-  esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
+  err = esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
+  if (err != ESP_OK)
+  {
+    ptperr("ETH_CMD_G_MAC_ADDR failed: %s\n", esp_err_to_name(err));
+    return ERROR;
+  }
 
   // Add well-known PTP multicast destination MAC addresses to the filter
   uint8_t dest_addr[ETH_ADDR_LEN];
   SET_MAC_ADDR(dest_addr, 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00);
-  esp_eth_ioctl(eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+  err = esp_eth_ioctl(eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+  if (err != ESP_OK)
+  {
+    ptperr("ETH_CMD_ADD_MAC_FILTER(01:1B:19:00:00:00) failed: %s\n", esp_err_to_name(err));
+    return ERROR;
+  }
   SET_MAC_ADDR(dest_addr, 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E);
-  esp_eth_ioctl(eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+  err = esp_eth_ioctl(eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+  if (err != ESP_OK)
+  {
+    ptperr("ETH_CMD_ADD_MAC_FILTER(01:80:C2:00:00:0E) failed: %s\n", esp_err_to_name(err));
+    return ERROR;
+  }
 
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
@@ -984,8 +1039,10 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
     }
   else
     {
-      ptpinfo("Sent announce, seq %ld\n",
+      ptpinfo("Sent announce, seq %ld",
               (long)ptp_get_sequence(&msg.header));
+      // ptpwarn("Sent announce, seq %ld\n",
+      //         (long)ptp_get_sequence(&msg.header));
     }
 
   return ret;
@@ -1081,8 +1138,8 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
       return ret;
     }
 
-  ptpinfo("Sent sync + follow-up, seq %ld\n",
-          (long)ptp_get_sequence(&msg.header));
+  //ptpinfo("Sent sync + follow-up, seq %ld\n",
+  //        (long)ptp_get_sequence(&msg.header));
 #else
   ptpinfo("Sent sync, seq %ld\n",
           (long)ptp_get_sequence(&msg.header));
@@ -1681,6 +1738,9 @@ static int ptp_process_delay_resp(FAR struct ptp_state_s *state,
 static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
                                  ssize_t length)
 {
+  ESP_LOGD(TAG, "ptp_process_rx_packet: length=%d (min required=%d)",
+           (int)length, (int)sizeof(struct ptp_header_s));
+
   if (length < sizeof(struct ptp_header_s))
     {
       ptpwarn("Ignoring invalid PTP packet, length only %d bytes\n",
@@ -1688,14 +1748,29 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
       return OK;
     }
 
+  ESP_LOGD(TAG, "ptp_process_rx_packet: domain=0x%02x (expected=0x%02x), msgtype=0x%02x",
+           state->rxbuf.header.domain,
+           (uint8_t)CONFIG_NETUTILS_PTPD_DOMAIN,
+           state->rxbuf.header.messagetype);
+
   if (state->rxbuf.header.domain != CONFIG_NETUTILS_PTPD_DOMAIN)
     {
       /* Part of different clock domain, ignore */
-
+      ESP_LOGW(TAG, "ptp_process_rx_packet: domain mismatch: got=0x%02x, want=0x%02x, IGNORED",
+               state->rxbuf.header.domain, (uint8_t)CONFIG_NETUTILS_PTPD_DOMAIN);
       return OK;
     }
 
   clock_gettime(CLOCK_MONOTONIC, &state->last_received_multicast);
+
+      ptpinfo(".Got pkt, seq %ld, sec %lu, nsec %lu\n",
+              (long)ptp_get_sequence(&state->rxbuf.header),
+              state->last_received_multicast.tv_sec,
+              state->last_received_multicast.tv_nsec);
+      ESP_LOGW(TAG,".Got pkt, seq %ld, sec %lu, nsec %lu\n",
+              (long)ptp_get_sequence(&state->rxbuf.header),
+              state->last_received_multicast.tv_sec,
+              state->last_received_multicast.tv_nsec);
 
   switch (state->rxbuf.header.messagetype & PTP_MSGTYPE_MASK)
   {
@@ -1925,11 +2000,47 @@ static int ptp_daemon(int argc, FAR char** argv)
 	  ret = poll(pollfds, 1, PTPD_POLL_INTERVAL);
 #endif // !ESP_PTP
 
-      if (pollfds[0].revents)
+#ifdef ESP_PTP
+      ESP_LOGD(TAG, "poll() ret=%d, revents=0x%x", ret, pollfds[0].revents);
+      if (ret < 0)
+        {
+          ESP_LOGE(TAG, "poll() failed, errno=%d (%s)", errno, strerror(errno));
+        }
+      else if (ret == 0)
+        {
+          ESP_LOGD(TAG, "poll() timeout, no packet received");
+        }
+      else
+        {
+          if (pollfds[0].revents & POLLIN)
+            {
+              ESP_LOGD(TAG, "poll() revents has POLLIN");
+            }
+          if (pollfds[0].revents & POLLERR)
+            {
+              ESP_LOGE(TAG, "poll() revents has POLLERR");
+            }
+          if (pollfds[0].revents & POLLHUP)
+            {
+              ESP_LOGW(TAG, "poll() revents has POLLHUP");
+            }
+          if (pollfds[0].revents & POLLNVAL)
+            {
+              ESP_LOGE(TAG, "poll() revents has POLLNVAL (invalid fd=%d)", pollfds[0].fd);
+            }
+          if (pollfds[0].revents & POLLPRI)
+            {
+              ESP_LOGD(TAG, "poll() revents has POLLPRI");
+            }
+        }
+#endif // ESP_PTP
+
+      if (pollfds[0].revents & POLLIN)
         {
           /* Receive time-critical packet, potentially with cmsg
            * indicating the timestamp.
            */
+          ESP_LOGD(TAG, "poll() POLLIN event on ptp_socket, reading packet...");
 
 #ifdef ESP_PTP
           ret = ptp_net_recv(state, &state->rxbuf, sizeof(state->rxbuf), &state->rxtime);
@@ -1939,10 +2050,15 @@ static int ptp_daemon(int argc, FAR char** argv)
 
           if (ret > 0)
             {
+              ESP_LOGD(TAG, "ptp_net_recv OK, PTP payload len=%d, calling ptp_process_rx_packet", ret);
 #ifndef ESP_PTP
               ptp_getrxtime(state, &rxhdr, &state->rxtime);
 #endif
               ptp_process_rx_packet(state, ret);
+            }
+          else
+            {
+              ESP_LOGW(TAG, "ptp_net_recv returned %d, skipping process", ret);
             }
         }
 

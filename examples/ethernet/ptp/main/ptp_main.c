@@ -122,6 +122,9 @@ IRAM_ATTR bool ts_callback(esp_eth_mediator_t *eth, void *user_args)
 
 void app_main(void)
 {
+    esp_log_level_set("dm9058.mac", ESP_LOG_DEBUG);
+    esp_log_level_set("ptpd", ESP_LOG_DEBUG);
+
     init_ethernet_and_netif();
 
     esp_eth_clock_cfg_t clock_cfg = {
