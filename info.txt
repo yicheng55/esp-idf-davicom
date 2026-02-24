@@ -1,4 +1,6 @@
+
 (1) repo_stairs2.1 (main develop)
+(1+) repo_stairs2.2  (merge to get ptp_recv_times right) equ to dm9058_ptp_v002_test (merge as another direction, firstly)
 (2) repo_devel_copy2 (reference NO panic version)
 
 (1) repo_stairs2.1 (main develop) ping on, sync ok, follow-up ok
