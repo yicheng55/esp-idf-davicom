@@ -984,7 +984,9 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
     }
   else
     {
-      ptpinfo("Sent announce, seq %ld\n",
+      ptpinfo("Sent announce, seq %ld",
+              (long)ptp_get_sequence(&msg.header));
+      ptpwarn("Sent announce, seq %ld\n",
               (long)ptp_get_sequence(&msg.header));
     }
 
@@ -1081,8 +1083,8 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
       return ret;
     }
 
-  ptpinfo("Sent sync + follow-up, seq %ld\n",
-          (long)ptp_get_sequence(&msg.header));
+  //ptpinfo("Sent sync + follow-up, seq %ld\n",
+  //        (long)ptp_get_sequence(&msg.header));
 #else
   ptpinfo("Sent sync, seq %ld\n",
           (long)ptp_get_sequence(&msg.header));
@@ -1696,6 +1698,15 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
     }
 
   clock_gettime(CLOCK_MONOTONIC, &state->last_received_multicast);
+
+      ptpinfo(".Got pkt, seq %ld, sec %lu, nsec %lu\n",
+              (long)ptp_get_sequence(&state->rxbuf.header),
+              state->last_received_multicast.tv_sec,
+              state->last_received_multicast.tv_nsec);
+      ESP_LOGW(TAG,".Got pkt, seq %ld, sec %lu, nsec %lu\n",
+              (long)ptp_get_sequence(&state->rxbuf.header),
+              state->last_received_multicast.tv_sec,
+              state->last_received_multicast.tv_nsec);
 
   switch (state->rxbuf.header.messagetype & PTP_MSGTYPE_MASK)
   {
