@@ -1041,8 +1041,8 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
     {
       ptpinfo("Sent announce, seq %ld",
               (long)ptp_get_sequence(&msg.header));
-      ptpwarn("Sent announce, seq %ld\n",
-              (long)ptp_get_sequence(&msg.header));
+      // ptpwarn("Sent announce, seq %ld\n",
+      //         (long)ptp_get_sequence(&msg.header));
     }
 
   return ret;
