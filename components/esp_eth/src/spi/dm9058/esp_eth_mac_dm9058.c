@@ -912,6 +912,24 @@ err:
     return ret;
 }
 
+static esp_err_t esp32_DM9058_transmit_ctrl_vargs(esp_eth_mac_t *mac, void *ctrl, uint32_t argc, va_list args)
+{
+    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
+    uint8_t *buf = va_arg(args, uint8_t *);
+    uint32_t length = va_arg(args, uint32_t);
+    esp_err_t ret = esp32_DM9058_transmit(mac, buf, length);
+    if (ret == ESP_OK && ctrl && emac->ptp_auto_process && emac->ptp.enabled) {
+        // Try to get TX timestamp
+        esp_eth_ptp_dm9058_time_t ts;
+        if (esp_eth_ptp_dm9058_get_tx_timestamp(&emac->ptp, &ts) == ESP_OK) {
+            eth_mac_time_t *eth_ts = (eth_mac_time_t *)ctrl;
+            eth_ts->seconds = ts.seconds;
+            eth_ts->nanoseconds = ts.nanoseconds;
+        }
+    }
+    return ret;
+}
+
 static esp_err_t DM9058_skip_recv_frame(esp32_DM9058_t *emac, uint16_t rx_length)
 {
     esp_err_t ret = ESP_OK;
@@ -1210,6 +1228,7 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
     emac->parent.add_mac_filter = esp32_DM9058_add_mac_filter;
     emac->parent.rm_mac_filter = esp32_DM9058_rm_mac_filter;
     emac->parent.custom_ioctl = esp32_DM9058_custom_ioctl;
+    emac->parent.transmit_ctrl_vargs = esp32_DM9058_transmit_ctrl_vargs;
 
     if (DM9058_config->custom_spi_driver.init != NULL && DM9058_config->custom_spi_driver.deinit != NULL
             && DM9058_config->custom_spi_driver.read != NULL && DM9058_config->custom_spi_driver.write != NULL) {
