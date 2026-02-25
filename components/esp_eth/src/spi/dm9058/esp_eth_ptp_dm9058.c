@@ -688,15 +688,15 @@ esp_err_t esp_eth_ptp_dm9058_rx_timestamp(const uint8_t *rx_ts_buffer, size_t rx
     ESP_RETURN_ON_FALSE(rx_ts_len == 4 || rx_ts_len == 8, ESP_ERR_INVALID_ARG, "dm9058.ptp", "rx timestamp length must be 4 or 8");
 
     memset(time, 0, sizeof(*time));
-    time->nanoseconds = (uint32_t)rx_ts_buffer[0] |
-                        ((uint32_t)rx_ts_buffer[1] << 8) |
-                        ((uint32_t)rx_ts_buffer[2] << 16) |
-                        ((uint32_t)rx_ts_buffer[3] << 24);
+    time->nanoseconds = (uint32_t)rx_ts_buffer[7] |
+                        ((uint32_t)rx_ts_buffer[6] << 8) |
+                        ((uint32_t)rx_ts_buffer[5] << 16) |
+                        ((uint32_t)rx_ts_buffer[4] << 24);
     if (rx_ts_len == 8) {
-        time->seconds = (uint32_t)rx_ts_buffer[4] |
-                        ((uint32_t)rx_ts_buffer[5] << 8) |
-                        ((uint32_t)rx_ts_buffer[6] << 16) |
-                        ((uint32_t)rx_ts_buffer[7] << 24);
+        time->seconds = (uint32_t)rx_ts_buffer[3] |
+                        ((uint32_t)rx_ts_buffer[2] << 8) |
+                        ((uint32_t)rx_ts_buffer[1] << 16) |
+                        ((uint32_t)rx_ts_buffer[0] << 24);
     }
     return ESP_OK;
 }
