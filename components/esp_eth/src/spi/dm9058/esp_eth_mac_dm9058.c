@@ -1092,8 +1092,8 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             uint16_t rx_len = header.length_low + (header.length_high << 8);
             /* store the whole frame to preallocated memory */
             if (rx_len <= ETH_MAX_PACKET_SIZE) {
-                ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
                 ESP_GOTO_ON_ERROR(DM9058_handle_rx_ptp_timestamp(emac, &header), err, TAG, "handle rx ptp timestamp failed");
+                ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
             } else {
                 /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
                 ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
