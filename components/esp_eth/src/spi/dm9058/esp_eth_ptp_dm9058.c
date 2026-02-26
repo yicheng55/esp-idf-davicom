@@ -112,9 +112,9 @@ static esp_err_t dm9058_ptp_read_bytes(esp_eth_ptp_dm9058_t *ptp, uint8_t reg, u
 
 static esp_err_t dm9058_ptp_write_bytes(esp_eth_ptp_dm9058_t *ptp, uint8_t reg, const uint8_t *buffer, size_t len)
 {
-    if (ptp->ops.reg_burst_write) {
-        return ptp->ops.reg_burst_write(ptp->io_ctx, reg, buffer, len);
-    }
+    // if (ptp->ops.reg_burst_write) {
+    //     return ptp->ops.reg_burst_write(ptp->io_ctx, reg, buffer, len);
+    // }
     for (size_t i = 0; i < len; i++) {
         esp_err_t ret = ptp->ops.reg_write(ptp->io_ctx, reg, buffer[i]);
         if (ret != ESP_OK) {
@@ -633,6 +633,7 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx
     return ESP_OK;
 }
 
+#if 0
 esp_err_t esp_eth_ptp_dm9058_parse_rx_packet(esp_eth_ptp_dm9058_t *ptp,
                                              const uint8_t *rx_header, size_t rx_header_len,
                                              const uint8_t *rx_ts_buffer, size_t rx_ts_buffer_len,
@@ -676,6 +677,7 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_packet(esp_eth_ptp_dm9058_t *ptp,
 
     return ESP_OK;
 }
+#endif
 
 esp_err_t esp_eth_ptp_dm9058_tx_timestamp(esp_eth_ptp_dm9058_t *ptp, esp_eth_ptp_dm9058_time_t *time)
 {
