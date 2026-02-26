@@ -157,6 +157,7 @@ struct ptp_state_s
 #ifdef ESP_PTP
   uint8_t intf_hw_addr[ETH_ADDR_LEN];
   int ptp_socket;
+  esp_eth_handle_t eth_handle;
 
   int64_t remote_time_ns_prev;
   int64_t local_time_ns_prev;
@@ -635,14 +636,13 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     return ERROR;
   }
   // Enable time stamping in driver
-  esp_eth_handle_t eth_handle;
-  if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0)
+  if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &state->eth_handle) < 0)
   {
     ptperr("failed to get socket eth_handle %d\n", errno);
     return ERROR;
   }
   esp_eth_clock_cfg_t clk_cfg = {
-    .eth_hndl = eth_handle,
+    .eth_hndl = state->eth_handle,
   };
   esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
 
@@ -654,14 +654,14 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   }
 
   // get HW address
-  esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
+  esp_eth_ioctl(state->eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
 
   // Add well-known PTP multicast destination MAC addresses to the filter
   uint8_t dest_addr[ETH_ADDR_LEN];
   SET_MAC_ADDR(dest_addr, 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00);
-  esp_eth_ioctl(eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+  esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
   SET_MAC_ADDR(dest_addr, 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E);
-  esp_eth_ioctl(eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+  esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
 
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
@@ -1255,19 +1255,27 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   // clock tick difference between master and slave
   int64_t tick_diff = remote_delta_ns - local_delta_ns;
 
-  // compute how to scale the slave frequency to lock with master frequency and also try to catch-up the offset
-  double freq_scale = ((double)(remote_delta_ns /*+ tick_diff*/ + adj)) / (double)local_delta_ns;
-  esp_eth_clock_adj_param_t clk_adj_param = {
-    .mode = ETH_CLK_ADJ_FREQ_SCALE,
-    .freq_scale = freq_scale
-  };
-  esp_eth_clock_adjtime(CLOCK_PTP_SYSTEM, &clk_adj_param);
-
+  // For simplicity, directly convert the adj to ppb and use it to adjust the clock frequency.
+  int64_t adj_ppb = adj * MSEC_PER_SEC / local_delta_ns;
+  // clamp to ±500 ppm
+  if (adj_ppb > 512000LL) {
+    adj_ppb = 512000LL;
+  } else if (adj_ppb < -512000LL) {
+    adj_ppb = -512000LL;
+  }
+  // Call esp_eth_ptp_dm9058_adj_freq(adj_ppb) via ioctl
+  int32_t adj_ppb_i32 = (int32_t)adj_ppb;
+  #if 0
+  //[tbd] currently only DM9058 supports frequency adjustment, need to add check for eth driver type here when more drivers are supported
+  esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ, &adj_ppb_i32);
+  #endif
   state->remote_time_ns_prev = remote_time_ns;
   state->local_time_ns_prev = local_time_ns;
 
-  ptpinfo("remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli\n", remote_delta_ns, local_delta_ns, tick_diff);
-  ptpinfo("offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
+  // ptpinfo("remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
+  // ptpinfo("offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
+  ESP_LOGW(TAG, "remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
+  ESP_LOGW(TAG, "offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),
   // we would get incorrect delay
