@@ -1954,18 +1954,15 @@ static int ptp_daemon(int argc, FAR char** argv)
               {	
                 //esp32_DM9058_custom_ioctl()
 		            //to get 'emac->last_rx_timestamp'
-                esp_eth_handle_t eth_handle;
-                if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) == 0) {
-                  eth_mac_time_t rx_ts = {0};
-                  if (esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
-                    state->rxtime.tv_sec  = (time_t)rx_ts.seconds;
-                    state->rxtime.tv_nsec = (long)rx_ts.nanoseconds;
-                    ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                  } else {
-                    ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping L2TAP timestamp");
-                  }
+                eth_mac_time_t rx_ts = {0};
+                if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
+                  state->rxtime.tv_sec  = (time_t)rx_ts.seconds;
+                  state->rxtime.tv_nsec = (long)rx_ts.nanoseconds;
+                  ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
+                } else {
+                  ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping L2TAP timestamp");
                 }
-              }
+            }
 #endif // ESP_PTP
               ptp_process_rx_packet(state, ret);
             }
