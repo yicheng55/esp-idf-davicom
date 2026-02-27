@@ -2,6 +2,8 @@
 #include "esp_check.h"
 #include "esp_eth_ptp_dm9058.h"
 
+static const char *PTP_TAG = "dm9058.ptp";
+
 /* DM9058 PTP registers */
 #define DM9058_NSR   (0x01)
 #define DM9058_MRCMDX (0x70)

@@ -32,7 +32,7 @@
 #include "esp_eth_ptp_dm9058.h"
 
 static const char *TAG = "dm9058.mac";
-static const char *PTP_TAG = "dm9051.ptp";
+static const char *PTP_TAG = "dm9058.ptp";
 
 typedef bool (*dm9051_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 
