@@ -129,8 +129,9 @@
 
 #ifdef ESP_PTP
 #define ADJ_FREQ_MAX 512000 // TODO tuneup
-#define PTP_OFFSET_DEADBAND_NS 1000
-#define PTP_TICK_FF_GAIN_PCT 100
+#define PTP_OFFSET_DEADBAND_NS 10    // 10 ns: near-zero deadband; relies on DM9058 HW timestamp resolution (~8 ns) being stable enough to avoid noise-driven drift_acc jitter
+#define PTP_TICK_FF_GAIN_PCT 20   // Reduced from 100: 100% FF re-injects the oscillation as positive feedback during limit cycle
+#define PTP_DRIFT_ACC_RESET_THRESHOLD_NS 50000  // Only reset drift_acc on large sign-change transients (50 µs)
 typedef struct
 {
   int32_t kp;
@@ -693,8 +694,8 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
 
-  state->offset_pi.kp = 1;
-  state->offset_pi.ki = 10;
+  state->offset_pi.kp = 5;   // Dead-beat (kp=1) causes 2-cycle limit cycle; kp=5 → ~20% correction/step → exponential convergence
+  state->offset_pi.ki = 50;  // Slow integrator accumulation lets drift_acc converge to true frequency error (~490 ppm) without windup
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1231,19 +1232,7 @@ static int ptp_periodic_send(FAR struct ptp_state_s *state)
 static int ptp_process_announce(FAR struct ptp_state_s *state,
                                 FAR struct ptp_announce_s *msg)
 {
-  //clock_gettime(CLOCK_MONOTONIC, &state->last_received_announce);
-  #if 1
-  {
-    eth_mac_time_t rx_ts = {0};
-    if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
-      state->last_received_announce.tv_sec  = (time_t)rx_ts.seconds;
-      state->last_received_announce.tv_nsec = (long)rx_ts.nanoseconds;
-      ESP_LOGD(TAG, "RX TIME hw timestamp: %lld.%09ld", (long long)state->last_received_announce.tv_sec, state->last_received_announce.tv_nsec);
-    } else {
-      ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping ..");
-    }
-  }
-  #endif // 1
+  clock_gettime(CLOCK_MONOTONIC, &state->last_received_announce);
 
   if (is_better_clock(msg, &state->own_identity))
     {
@@ -1275,14 +1264,20 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   offset_ns += state->path_delay_ns;
   // TODO add offset filter
 
-  if (llabs(offset_ns) <= PTP_OFFSET_DEADBAND_NS) {
-    offset_ns = 0;
-  }
+  // if (llabs(offset_ns) <= PTP_OFFSET_DEADBAND_NS) {
+  //   offset_ns = 0;
+  // }
 
+  // Only reset drift_acc on a large-amplitude sign change (e.g. after a step-correction), NOT on the small
+  // zero-crossings that are a normal part of PI convergence. Resetting on every sign change prevents the
+  // integrator from ever building up enough to cancel the steady-state frequency error.
   if ((offset_ns > 0 && state->last_offset_ns < 0) ||
       (offset_ns < 0 && state->last_offset_ns > 0)) {
-    state->offset_pi.drift_acc = 0;
-    prev_drift_acc = 0;
+    if (llabs(offset_ns) > PTP_DRIFT_ACC_RESET_THRESHOLD_NS ||
+        llabs(state->last_offset_ns) > PTP_DRIFT_ACC_RESET_THRESHOLD_NS) {
+      state->offset_pi.drift_acc = 0;
+      prev_drift_acc = 0;
+    }
   }
 
   // Compute difference between number of ticks in slave and master over sync period. This is used to lock the frequency with the master.
@@ -1608,19 +1603,7 @@ static int ptp_process_sync(FAR struct ptp_state_s *state,
 
   /* Update timeout tracking */
 
-  //clock_gettime(CLOCK_MONOTONIC, &state->last_received_sync);
-  #if 1
-  {
-    eth_mac_time_t rx_ts = {0};
-    if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
-      state->last_received_sync.tv_sec  = (time_t)rx_ts.seconds;
-      state->last_received_sync.tv_nsec = (long)rx_ts.nanoseconds;
-      ESP_LOGD(TAG, "GET RX TIME hw timestamp: %lld.%09ld", (long long)state->last_received_sync.tv_sec, state->last_received_sync.tv_nsec);
-    } else {
-      ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping ..");
-    }
-  }
-  #endif // 1
+  clock_gettime(CLOCK_MONOTONIC, &state->last_received_sync);
 
   if (msg->header.flags[0] & PTP_FLAGS0_TWOSTEP)
     {
@@ -1817,6 +1800,13 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
     {
       /* Part of different clock domain, ignore */
 
+      return OK;
+    }
+
+  if (memcmp(state->rxbuf.header.sourceidentity,
+             state->own_identity.header.sourceidentity,
+             sizeof(state->rxbuf.header.sourceidentity)) == 0)
+    {
       return OK;
     }
 
