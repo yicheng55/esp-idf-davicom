@@ -129,7 +129,7 @@
 
 #ifdef ESP_PTP
 #define ADJ_FREQ_MAX 512000 // TODO tuneup
-#define PTP_OFFSET_DEADBAND_NS 10    // 10 ns: near-zero deadband; relies on DM9058 HW timestamp resolution (~8 ns) being stable enough to avoid noise-driven drift_acc jitter
+#define PTP_OFFSET_DEADBAND_NS 40    // 40 ns: near-zero deadband; relies on DM9058 HW timestamp resolution (~8 ns) being stable enough to avoid noise-driven drift_acc jitter
 #define PTP_TICK_FF_GAIN_PCT 20   // Reduced from 100: 100% FF re-injects the oscillation as positive feedback during limit cycle
 #define PTP_DRIFT_ACC_RESET_THRESHOLD_NS 50000  // Only reset drift_acc on large sign-change transients (50 µs)
 typedef struct
@@ -1265,9 +1265,9 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   offset_ns += state->path_delay_ns;
   // TODO add offset filter
 
-  // if (llabs(offset_ns) <= PTP_OFFSET_DEADBAND_NS) {
-  //   offset_ns = 0;
-  // }
+  if (llabs(offset_ns) <= PTP_OFFSET_DEADBAND_NS) {
+    offset_ns = 0;
+  }
 
   // Only reset drift_acc on a large-amplitude sign change (e.g. after a step-correction), NOT on the small
   // zero-crossings that are a normal part of PI convergence. Resetting on every sign change prevents the
