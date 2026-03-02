@@ -833,7 +833,9 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         return ESP_OK;
     case ETH_MAC_DM9058_CMD_G_PTP_RX_TIME:
         ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_RX_TIME expects eth_mac_time_t*");
-        ESP_RETURN_ON_FALSE(emac->rx_timestamp_valid, ESP_ERR_NOT_FOUND, TAG, "rx timestamp not available");
+        if (!emac->rx_timestamp_valid) {
+            return ESP_ERR_NOT_FOUND;
+        }
         time->seconds = emac->last_rx_timestamp.seconds;
         time->nanoseconds = emac->last_rx_timestamp.nanoseconds;
         emac->rx_timestamp_valid = false;

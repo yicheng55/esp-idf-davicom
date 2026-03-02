@@ -31,6 +31,7 @@ static const char *PTP_TAG = "dm9058.ptp";
 #define DM9058_PTP_MAX_ADJUSTMENT         (0xEFFFFFFFU)
 
 /* 2^32 * 40 / 1e9 in Q16 format */
+#define V51_ADJ_FREQ_BASE_ADDEND     171.7987 /* Base addend for frequency adjustment */
 #define DM9058_PTP_FREQ_BASE_ADDEND_Q16   (11259106)
 
 /* Network protocol constants for packet parsing */
@@ -285,7 +286,8 @@ esp_err_t esp_eth_ptp_dm9058_adj_freq(esp_eth_ptp_dm9058_t *ptp, int32_t adj_ppb
     esp_err_t ret = ESP_OK;
     bool locked = false;
     uint8_t raw[4];
-    int64_t signed_addend = ((int64_t)adj_ppb * (int64_t)DM9058_PTP_FREQ_BASE_ADDEND_Q16) >> 16;
+    // int64_t signed_addend = ((int64_t)adj_ppb * (int64_t)DM9058_PTP_FREQ_BASE_ADDEND_Q16) >> 16;
+    int64_t signed_addend = (int64_t)(adj_ppb * V51_ADJ_FREQ_BASE_ADDEND);
     int64_t delta = signed_addend - ptp->last_rate;
     uint32_t adjustment;
     uint8_t control_value;
