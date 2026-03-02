@@ -227,6 +227,7 @@ struct ptp_state_s
   /* Timestamps related to path delay calculation (CLOCK_REALTIME) */
 
   bool can_send_delayreq;
+  int delayreq_stability_cnt;  // counts consecutive stable-offset samples before allowing delay req
   struct timespec delayreq_time;
   int path_delay_avgcount;
   long path_delay_ns;
@@ -1353,16 +1354,16 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   ESP_LOGW(TAG, "offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),
-  // we would get incorrect delay
+  // we would get incorrect delay.
+  // Use state->delayreq_stability_cnt (not static local) so it resets correctly on re-lock.
   int64_t diff = llabs(offset_ns) - llabs(state->last_offset_ns);
-  static int cnt = 0;
   if (llabs(diff) < CONFIG_NETUTILS_PTPD_PATH_DELAY_STABILITY_NS) {
-    if (cnt <= 3)
-      cnt++;
+    if (state->delayreq_stability_cnt <= 3)
+      state->delayreq_stability_cnt++;
   } else {
-    cnt = 0;
+    state->delayreq_stability_cnt = 0;
   }
-  if (cnt > 3)
+  if (state->delayreq_stability_cnt > 3)
   {
     state->can_send_delayreq = true;
   }
@@ -1376,6 +1377,8 @@ void ptp_clean_after_step(FAR struct ptp_state_s *state)
 
   state->offset_pi.drift_acc = 0;
   state->last_offset_ns = 0;
+  state->delayreq_stability_cnt = 0;
+  state->can_send_delayreq = false;
 }
 #endif // ESP_PTP
 
