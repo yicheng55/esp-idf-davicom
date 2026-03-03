@@ -567,8 +567,8 @@ static int ptp_settime(FAR struct ptp_state_s *state,
 {
   UNUSED(state);
 #ifdef ESP_PTP
-  //return esp_eth_clock_settime(CLOCK_PTP_SYSTEM, ts);
-  #if 1
+  return esp_eth_clock_settime(CLOCK_PTP_SYSTEM, ts);
+  #if 0
     {
       eth_mac_time_t tts = {0};
       tts.seconds = (uint32_t)ts->tv_sec;
@@ -670,9 +670,11 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     ptperr("failed to get socket eth_handle %d\n", errno);
     return ERROR;
   }
+  ESP_LOGI(TAG, "L2TAP eth handle: %p", (void *)state->eth_handle);
   esp_eth_clock_cfg_t clk_cfg = {
     .eth_hndl = state->eth_handle,
   };
+  ESP_LOGI(TAG, "esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
   esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
 
   // Enable time stamping in L2TAP
@@ -1413,8 +1415,8 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
        */
 
       struct timespec new_time;
-      //ptp_gettime(state, &new_time);
-      #if 1
+      ptp_gettime(state, &new_time);
+      #if 0
       {
         eth_mac_time_t rx_ts = {0};
         if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_TIME, &rx_ts) == ESP_OK) {
@@ -1428,8 +1430,8 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
       #endif // 1
       clock_timespec_subtract(&new_time, local_timestamp, &new_time);
       clock_timespec_add(&new_time, remote_timestamp, &new_time);
-      //ret = ptp_settime(state, &new_time);
-      #if 1
+      ret = ptp_settime(state, &new_time);
+      #if 0
       {
         eth_mac_time_t rx_ts = {0};
         rx_ts.seconds = (uint32_t)new_time.tv_sec;
@@ -2064,14 +2066,25 @@ static int ptp_daemon(int argc, FAR char** argv)
               {
                 //esp32_DM9058_custom_ioctl()
 		            //to get 'emac->last_rx_timestamp'
+
+                if( esp_eth_clock_get_rx_time(state->eth_handle, &state->rxtime) == ESP_OK) {
+                  ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
+                } else {
+                  ESP_LOGD(TAG, "get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
+                }
+
+                #if 0
                 eth_mac_time_t rx_ts = {0};
-                if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
+                if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK)
+                {
                   state->rxtime.tv_sec  = (time_t)rx_ts.seconds;
                   state->rxtime.tv_nsec = (long)rx_ts.nanoseconds;
                   ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                } else {
+                } else
+                {
                   ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping L2TAP timestamp");
                 }
+                #endif // 0
             }
 #endif // ESP_PTP
               ptp_process_rx_packet(state, ret);

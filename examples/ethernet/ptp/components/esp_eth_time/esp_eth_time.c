@@ -6,8 +6,10 @@
 
 #include <errno.h>
 #include "esp_eth_time.h"
+#include "esp_log.h"
 
 static esp_eth_handle_t s_eth_hndl;
+static const char *TAG = "esp_eth_time";
 
 static int esp_eth_clock_esp_err_to_errno(esp_err_t esp_err)
 {
@@ -79,6 +81,7 @@ int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp)
     case CLOCK_PTP_SYSTEM: {
         if (s_eth_hndl) {
             eth_mac_time_t ptp_time;
+            ESP_LOGI(TAG, "gettime s_eth_hndl: %p", (void *)s_eth_hndl);
             esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_ESP_CMD_G_PTP_TIME, &ptp_time);
             if (ret != ESP_OK) {
                 errno = esp_eth_clock_esp_err_to_errno(ret);
@@ -97,6 +100,23 @@ int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp)
         return -1;
     }
     return 0;
+}
+
+esp_err_t esp_eth_clock_get_rx_time(esp_eth_handle_t eth_handle, struct timespec *tp)
+{
+    if (!eth_handle || !tp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    eth_mac_time_t ptp_rx_time;
+    ESP_LOGI(TAG, "get_rx_time eth_handle: %p", eth_handle);
+    esp_err_t ret = esp_eth_ioctl(eth_handle, ETH_MAC_ESP_CMD_G_PTP_RX_TIME, &ptp_rx_time);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    tp->tv_sec = ptp_rx_time.seconds;
+    tp->tv_nsec = ptp_rx_time.nanoseconds;
+    return ESP_OK;
 }
 
 int esp_eth_clock_set_target_time(clockid_t clock_id, struct timespec *tp)
@@ -130,10 +150,12 @@ esp_err_t esp_eth_clock_init(clockid_t clock_id, esp_eth_clock_cfg_t *cfg)
     case CLOCK_PTP_SYSTEM:
         // PTP Clock is part of Ethernet system
         bool ptp_enable = true;
+        ESP_LOGI(TAG, "clock_init cfg->eth_hndl: %p", (void *)cfg->eth_hndl);
         if (esp_eth_ioctl(cfg->eth_hndl, ETH_MAC_ESP_CMD_PTP_ENABLE, &ptp_enable) != ESP_OK) {
             return ESP_FAIL;
         }
         s_eth_hndl = cfg->eth_hndl;
+        ESP_LOGI(TAG, "clock_init s_eth_hndl set to: %p", (void *)s_eth_hndl);
         break;
     default:
         return ESP_FAIL;
