@@ -109,7 +109,7 @@ esp_err_t esp_eth_clock_get_rx_time(esp_eth_handle_t eth_handle, struct timespec
     }
 
     eth_mac_time_t ptp_rx_time;
-    ESP_LOGI(TAG, "get_rx_time eth_handle: %p", eth_handle);
+    // ESP_LOGI(TAG, "get_rx_time eth_handle: %p", eth_handle);
     esp_err_t ret = esp_eth_ioctl(eth_handle, ETH_MAC_ESP_CMD_G_PTP_RX_TIME, &ptp_rx_time);
     if (ret != ESP_OK) {
         return ret;
