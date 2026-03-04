@@ -81,7 +81,7 @@ int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp)
     case CLOCK_PTP_SYSTEM: {
         if (s_eth_hndl) {
             eth_mac_time_t ptp_time;
-            ESP_LOGI(TAG, "gettime s_eth_hndl: %p", (void *)s_eth_hndl);
+            // ESP_LOGI(TAG, "gettime s_eth_hndl: %p", (void *)s_eth_hndl);
             esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_ESP_CMD_G_PTP_TIME, &ptp_time);
             if (ret != ESP_OK) {
                 errno = esp_eth_clock_esp_err_to_errno(ret);
