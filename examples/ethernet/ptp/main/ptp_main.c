@@ -55,19 +55,36 @@ void init_ethernet_and_netif(void)
 {
     uint8_t eth_port_cnt;
     esp_eth_handle_t *eth_handles;
+    esp_err_t ret;
 
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_LOGI(TAG, "[1] esp_event_loop_create_default");
+    ret = esp_event_loop_create_default();
+    ESP_LOGI(TAG, "[1] ret=%d (%s)", ret, esp_err_to_name(ret));
+    ESP_ERROR_CHECK(ret);
 
     s_eth_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
+    ESP_LOGI(TAG, "[2] esp_event_handler_register");
+    ret = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL);
+    ESP_LOGI(TAG, "[2] ret=%d (%s)", ret, esp_err_to_name(ret));
+    ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(example_eth_init(&eth_handles, &eth_port_cnt));
+    ESP_LOGI(TAG, "[3] example_eth_init (SPI SCLK=GPIO%d MOSI=GPIO%d)",
+             CONFIG_EXAMPLE_ETH_SPI_SCLK_GPIO, CONFIG_EXAMPLE_ETH_SPI_MOSI_GPIO);
+    ret = example_eth_init(&eth_handles, &eth_port_cnt);
+    ESP_LOGI(TAG, "[3] ret=%d (%s)", ret, esp_err_to_name(ret));
+    ESP_ERROR_CHECK(ret);
     s_eth_handles = eth_handles;
     s_eth_port_cnt = eth_port_cnt;
 
-    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_LOGI(TAG, "[4] esp_netif_init");
+    ret = esp_netif_init();
+    ESP_LOGI(TAG, "[4] ret=%d (%s)", ret, esp_err_to_name(ret));
+    ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(esp_vfs_l2tap_intf_register(NULL));
+    ESP_LOGI(TAG, "[5] esp_vfs_l2tap_intf_register");
+    ret = esp_vfs_l2tap_intf_register(NULL);
+    ESP_LOGI(TAG, "[5] ret=%d (%s)", ret, esp_err_to_name(ret));
+    ESP_ERROR_CHECK(ret);
 
     esp_netif_inherent_config_t esp_netif_base_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
     esp_netif_config_t esp_netif_config = {
@@ -87,11 +104,17 @@ void init_ethernet_and_netif(void)
         esp_netif_t *eth_netif = esp_netif_new(&esp_netif_config);
 
         // attach Ethernet driver to TCP/IP stack
-        ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handles[i])));
+        ESP_LOGI(TAG, "[6.%d] esp_netif_attach", i);
+        ret = esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handles[i]));
+        ESP_LOGI(TAG, "[6.%d] ret=%d (%s)", i, ret, esp_err_to_name(ret));
+        ESP_ERROR_CHECK(ret);
     }
 
     for (int i = 0; i < eth_port_cnt; i++) {
-        ESP_ERROR_CHECK(esp_eth_start(eth_handles[i]));
+        ESP_LOGI(TAG, "[7.%d] esp_eth_start", i);
+        ret = esp_eth_start(eth_handles[i]);
+        ESP_LOGI(TAG, "[7.%d] ret=%d (%s)", i, ret, esp_err_to_name(ret));
+        ESP_ERROR_CHECK(ret);
     }
     EventBits_t bits = xEventGroupWaitBits(s_eth_event_group, ETH_CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
     if ((bits & ETH_CONNECTED_BIT) == 0) {
