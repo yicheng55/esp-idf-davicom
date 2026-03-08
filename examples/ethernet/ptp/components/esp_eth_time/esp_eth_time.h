@@ -104,6 +104,19 @@ int esp_eth_clock_settime(clockid_t clock_id, const struct timespec *tp);
 int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp);
 
 /**
+ * @brief Get the PTP receive time
+ *
+ * @param eth_handle Ethernet handle
+ * @param tp Pointer to the buffer to store the receive time
+ *
+ * @return
+ *     - ESP_OK: Success
+ *     - ESP_ERR_INVALID_ARG: Invalid argument
+ *     - Other ESP_ERR_* codes: Hardware error
+ */
+esp_err_t esp_eth_clock_get_rx_time(esp_eth_handle_t eth_handle, struct timespec *tp);
+
+/**
  * @brief Set the target time for the system clock.
  *
  * @param clk_id Identifier of the clock to set the target time for

@@ -129,6 +129,9 @@
 
 #ifdef ESP_PTP
 #define ADJ_FREQ_MAX 512000 // TODO tuneup
+#define PTP_OFFSET_DEADBAND_NS 40    // 40 ns: near-zero deadband; relies on DM9058 HW timestamp resolution (~8 ns) being stable enough to avoid noise-driven drift_acc jitter
+#define PTP_TICK_FF_GAIN_PCT 20   // Reduced from 100: 100% FF re-injects the oscillation as positive feedback during limit cycle
+#define PTP_DRIFT_ACC_RESET_THRESHOLD_NS 50000  // Only reset drift_acc on large sign-change transients (50 µs)
 typedef struct
 {
   int32_t kp;
@@ -224,6 +227,7 @@ struct ptp_state_s
   /* Timestamps related to path delay calculation (CLOCK_REALTIME) */
 
   bool can_send_delayreq;
+  int delayreq_stability_cnt;  // counts consecutive stable-offset samples before allowing delay req
   struct timespec delayreq_time;
   int path_delay_avgcount;
   long path_delay_ns;
@@ -540,7 +544,7 @@ static int ptp_gettime(FAR struct ptp_state_s *state,
 #ifdef ESP_PTP
   return esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, ts);
   #if 0
-            {	
+            {
               eth_mac_time_t rx_ts = {0};
               if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_TIME, &rx_ts) == ESP_OK) {
                 ts->tv_sec  = (time_t)rx_ts.seconds;
@@ -563,9 +567,9 @@ static int ptp_settime(FAR struct ptp_state_s *state,
 {
   UNUSED(state);
 #ifdef ESP_PTP
-  //return esp_eth_clock_settime(CLOCK_PTP_SYSTEM, ts);
-  #if 1              
-    {	
+  return esp_eth_clock_settime(CLOCK_PTP_SYSTEM, ts);
+  #if 0
+    {
       eth_mac_time_t tts = {0};
       tts.seconds = (uint32_t)ts->tv_sec;
       tts.nanoseconds = (uint32_t)ts->tv_nsec;
@@ -666,9 +670,11 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     ptperr("failed to get socket eth_handle %d\n", errno);
     return ERROR;
   }
+  ESP_LOGI(TAG, "L2TAP eth handle: %p", (void *)state->eth_handle);
   esp_eth_clock_cfg_t clk_cfg = {
     .eth_hndl = state->eth_handle,
   };
+  ESP_LOGI(TAG, "esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
   esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
 
   // Enable time stamping in L2TAP
@@ -691,8 +697,8 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
 
-  state->offset_pi.kp = 1;
-  state->offset_pi.ki = 10;
+  state->offset_pi.kp = 5;   // Dead-beat (kp=1) causes 2-cycle limit cycle; kp=5 → ~20% correction/step → exponential convergence
+  state->offset_pi.ki = 50;  // Slow integrator accumulation lets drift_acc converge to true frequency error (~490 ppm) without windup
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1229,19 +1235,7 @@ static int ptp_periodic_send(FAR struct ptp_state_s *state)
 static int ptp_process_announce(FAR struct ptp_state_s *state,
                                 FAR struct ptp_announce_s *msg)
 {
-  //clock_gettime(CLOCK_MONOTONIC, &state->last_received_announce);
-  #if 1
-  {	
-    eth_mac_time_t rx_ts = {0};
-    if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
-      state->last_received_announce.tv_sec  = (time_t)rx_ts.seconds;
-      state->last_received_announce.tv_nsec = (long)rx_ts.nanoseconds;
-      ESP_LOGD(TAG, "RX TIME hw timestamp: %lld.%09ld", (long long)state->last_received_announce.tv_sec, state->last_received_announce.tv_nsec);
-    } else {
-      ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping ..");
-    }
-  }
-  #endif // 1
+  clock_gettime(CLOCK_MONOTONIC, &state->last_received_announce);
 
   if (is_better_clock(msg, &state->own_identity))
     {
@@ -1266,46 +1260,93 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
                                   FAR struct timespec *remote_timestamp,
                                   FAR struct timespec *local_timestamp)
 {
+  int32_t prev_drift_acc = state->offset_pi.drift_acc;
+
   // Compute how off we are against master
   int64_t offset_ns = timespec_delta_ns(remote_timestamp, local_timestamp);
   offset_ns += state->path_delay_ns;
   // TODO add offset filter
 
-  // Execute PI controller to elimitate the offset
-  // compute I component
-  state->offset_pi.drift_acc += offset_ns / state->offset_pi.ki;
-  // clamp the accumulator to ADJ_FREQ_MAX for sanity
-  if (state->offset_pi.drift_acc > ADJ_FREQ_MAX){
-    state->offset_pi.drift_acc = ADJ_FREQ_MAX;
-  } else if (state->offset_pi.drift_acc < -ADJ_FREQ_MAX) {
-    state->offset_pi.drift_acc = -ADJ_FREQ_MAX;
+  if (llabs(offset_ns) <= PTP_OFFSET_DEADBAND_NS) {
+    offset_ns = 0;
   }
-  // compute P component and the whole controller
-  int32_t adj = offset_ns / state->offset_pi.kp + state->offset_pi.drift_acc;
+
+  // Only reset drift_acc on a large-amplitude sign change (e.g. after a step-correction), NOT on the small
+  // zero-crossings that are a normal part of PI convergence. Resetting on every sign change prevents the
+  // integrator from ever building up enough to cancel the steady-state frequency error.
+  if ((offset_ns > 0 && state->last_offset_ns < 0) ||
+      (offset_ns < 0 && state->last_offset_ns > 0)) {
+    if (llabs(offset_ns) > PTP_DRIFT_ACC_RESET_THRESHOLD_NS ||
+        llabs(state->last_offset_ns) > PTP_DRIFT_ACC_RESET_THRESHOLD_NS) {
+      state->offset_pi.drift_acc = 0;
+      prev_drift_acc = 0;
+    }
+  }
 
   // Compute difference between number of ticks in slave and master over sync period. This is used to lock the frequency with the master.
   // However, it never catch-up the offset by itself, hence also add `adj` at the end
   int64_t remote_time_ns = timespec_to_ns(remote_timestamp);
   int64_t local_time_ns = timespec_to_ns(local_timestamp);
+
+  if (state->remote_time_ns_prev == 0 || state->local_time_ns_prev == 0) {
+    state->remote_time_ns_prev = remote_time_ns;
+    state->local_time_ns_prev = local_time_ns;
+    state->last_offset_ns = offset_ns;
+    return;
+  }
+
   int64_t remote_delta_ns = remote_time_ns - state->remote_time_ns_prev;
   int64_t local_delta_ns = local_time_ns - state->local_time_ns_prev;
   // clock tick difference between master and slave
   int64_t tick_diff = remote_delta_ns - local_delta_ns;
 
-  // For simplicity, directly convert the adj to ppb and use it to adjust the clock frequency.
-  int64_t adj_ppb = adj * MSEC_PER_SEC / local_delta_ns;
-  // clamp to ±500 ppm
-  if (adj_ppb > 512000LL) {
-    adj_ppb = 512000LL;
-  } else if (adj_ppb < -512000LL) {
-    adj_ppb = -512000LL;
+  if (local_delta_ns <= 0) {
+    state->remote_time_ns_prev = remote_time_ns;
+    state->local_time_ns_prev = local_time_ns;
+    return;
   }
+
+  // Execute PI controller to elimitate the offset
+  // compute I component
+  state->offset_pi.drift_acc += offset_ns / state->offset_pi.ki;
+  // clamp the accumulator to ADJ_FREQ_MAX for sanity
+  if (state->offset_pi.drift_acc > ADJ_FREQ_MAX) {
+    state->offset_pi.drift_acc = ADJ_FREQ_MAX;
+  } else if (state->offset_pi.drift_acc < -ADJ_FREQ_MAX) {
+    state->offset_pi.drift_acc = -ADJ_FREQ_MAX;
+  }
+
+  // compute P component and PI controller output in ns/s (ppb scale)
+  int32_t adj = offset_ns / state->offset_pi.kp + state->offset_pi.drift_acc;
+  int64_t pi_ppb = adj * NSEC_PER_SEC / local_delta_ns;
+  int64_t ff_ppb = (tick_diff * NSEC_PER_SEC / local_delta_ns) * PTP_TICK_FF_GAIN_PCT / 100;
+  int64_t adj_ppb = pi_ppb + ff_ppb;
+
+  // clamp to ±500 ppm
+  bool saturated = false;
+  if (adj_ppb > ADJ_FREQ_MAX) {
+    adj_ppb = ADJ_FREQ_MAX;
+    saturated = true;
+  } else if (adj_ppb < -ADJ_FREQ_MAX) {
+    adj_ppb = -ADJ_FREQ_MAX;
+    saturated = true;
+  }
+
+  if (saturated) {
+    bool would_push_more_positive = (adj_ppb >= ADJ_FREQ_MAX) && (offset_ns > 0);
+    bool would_push_more_negative = (adj_ppb <= -ADJ_FREQ_MAX) && (offset_ns < 0);
+    if (would_push_more_positive || would_push_more_negative) {
+      state->offset_pi.drift_acc = prev_drift_acc;
+    }
+  }
+
   // Call esp_eth_ptp_dm9058_adj_freq(adj_ppb) via ioctl
   int32_t adj_ppb_i32 = (int32_t)adj_ppb;
-  #if 0
   //[tbd] currently only DM9058 supports frequency adjustment, need to add check for eth driver type here when more drivers are supported
-  esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ, &adj_ppb_i32);
-  #endif
+  esp_err_t freq_adj_ret = esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ, &adj_ppb_i32);
+  if (freq_adj_ret != ESP_OK) {
+    ESP_LOGW(TAG, "ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ failed: %s", esp_err_to_name(freq_adj_ret));
+  }
   state->remote_time_ns_prev = remote_time_ns;
   state->local_time_ns_prev = local_time_ns;
 
@@ -1315,16 +1356,16 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   ESP_LOGW(TAG, "offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),
-  // we would get incorrect delay
+  // we would get incorrect delay.
+  // Use state->delayreq_stability_cnt (not static local) so it resets correctly on re-lock.
   int64_t diff = llabs(offset_ns) - llabs(state->last_offset_ns);
-  static int cnt = 0;
   if (llabs(diff) < CONFIG_NETUTILS_PTPD_PATH_DELAY_STABILITY_NS) {
-    if (cnt <= 3)
-      cnt++;
+    if (state->delayreq_stability_cnt <= 3)
+      state->delayreq_stability_cnt++;
   } else {
-    cnt = 0;
+    state->delayreq_stability_cnt = 0;
   }
-  if (cnt > 3)
+  if (state->delayreq_stability_cnt > 3)
   {
     state->can_send_delayreq = true;
   }
@@ -1338,6 +1379,8 @@ void ptp_clean_after_step(FAR struct ptp_state_s *state)
 
   state->offset_pi.drift_acc = 0;
   state->last_offset_ns = 0;
+  state->delayreq_stability_cnt = 0;
+  state->can_send_delayreq = false;
 }
 #endif // ESP_PTP
 
@@ -1372,9 +1415,9 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
        */
 
       struct timespec new_time;
-      //ptp_gettime(state, &new_time);
-      #if 1
-      {	
+      ptp_gettime(state, &new_time);
+      #if 0
+      {
         eth_mac_time_t rx_ts = {0};
         if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_TIME, &rx_ts) == ESP_OK) {
           new_time.tv_sec  = (time_t)rx_ts.seconds;
@@ -1387,9 +1430,9 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
       #endif // 1
       clock_timespec_subtract(&new_time, local_timestamp, &new_time);
       clock_timespec_add(&new_time, remote_timestamp, &new_time);
-      //ret = ptp_settime(state, &new_time);
-      #if 1
-      {	
+      ret = ptp_settime(state, &new_time);
+      #if 0
+      {
         eth_mac_time_t rx_ts = {0};
         rx_ts.seconds = (uint32_t)new_time.tv_sec;
         rx_ts.nanoseconds = (uint32_t)new_time.tv_nsec;
@@ -1565,19 +1608,7 @@ static int ptp_process_sync(FAR struct ptp_state_s *state,
 
   /* Update timeout tracking */
 
-  //clock_gettime(CLOCK_MONOTONIC, &state->last_received_sync);
-  #if 1
-  {	
-    eth_mac_time_t rx_ts = {0};
-    if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
-      state->last_received_sync.tv_sec  = (time_t)rx_ts.seconds;
-      state->last_received_sync.tv_nsec = (long)rx_ts.nanoseconds;
-      ESP_LOGD(TAG, "GET RX TIME hw timestamp: %lld.%09ld", (long long)state->last_received_sync.tv_sec, state->last_received_sync.tv_nsec);
-    } else {
-      ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping ..");
-    }
-  }
-  #endif // 1
+  clock_gettime(CLOCK_MONOTONIC, &state->last_received_sync);
 
   if (msg->header.flags[0] & PTP_FLAGS0_TWOSTEP)
     {
@@ -1774,6 +1805,13 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
     {
       /* Part of different clock domain, ignore */
 
+      return OK;
+    }
+
+  if (memcmp(state->rxbuf.header.sourceidentity,
+             state->own_identity.header.sourceidentity,
+             sizeof(state->rxbuf.header.sourceidentity)) == 0)
+    {
       return OK;
     }
 
@@ -2025,17 +2063,28 @@ static int ptp_daemon(int argc, FAR char** argv)
               ptp_getrxtime(state, &rxhdr, &state->rxtime);
 #endif
 #ifdef ESP_PTP
-              {	
+              {
                 //esp32_DM9058_custom_ioctl()
 		            //to get 'emac->last_rx_timestamp'
+
+                if( esp_eth_clock_get_rx_time(state->eth_handle, &state->rxtime) == ESP_OK) {
+                  ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
+                } else {
+                  ESP_LOGD(TAG, "get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
+                }
+
+                #if 0
                 eth_mac_time_t rx_ts = {0};
-                if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
+                if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK)
+                {
                   state->rxtime.tv_sec  = (time_t)rx_ts.seconds;
                   state->rxtime.tv_nsec = (long)rx_ts.nanoseconds;
                   ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                } else {
+                } else
+                {
                   ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping L2TAP timestamp");
                 }
+                #endif // 0
             }
 #endif // ESP_PTP
               ptp_process_rx_packet(state, ret);
