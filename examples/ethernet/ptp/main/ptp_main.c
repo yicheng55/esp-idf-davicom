@@ -64,6 +64,11 @@ void init_ethernet_and_netif(void)
 
     s_eth_event_group = xEventGroupCreate();
 
+    ESP_LOGI(TAG, "[7] esp_event_handler_register");
+    ret = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL);
+    ESP_LOGI(TAG, "[7] ret=%d (%s)", ret, esp_err_to_name(ret));
+    ESP_ERROR_CHECK(ret);
+
     ESP_LOGI(TAG, "[2] example_eth_init");
     ret = example_eth_init(&eth_handles, &eth_port_cnt);
     ESP_LOGI(TAG, "[2] ret=%d (%s)", ret, esp_err_to_name(ret));
@@ -112,10 +117,6 @@ void init_ethernet_and_netif(void)
         ESP_ERROR_CHECK(ret);
     }
 
-    ESP_LOGI(TAG, "[7] esp_event_handler_register");
-    ret = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL);
-    ESP_LOGI(TAG, "[7] ret=%d (%s)", ret, esp_err_to_name(ret));
-    ESP_ERROR_CHECK(ret);
     EventBits_t bits = xEventGroupWaitBits(s_eth_event_group, ETH_CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
     if ((bits & ETH_CONNECTED_BIT) == 0) {
         ESP_LOGW(TAG, "Ethernet Link Up timeout");
