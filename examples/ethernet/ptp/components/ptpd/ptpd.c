@@ -272,9 +272,22 @@ struct ptp_state_s
 
 #ifdef ESP_PTP
 static const char *TAG = "ptpd";
+/* Set to 0 to fully disable ptpd logs in this file. */
+#ifndef CONFIG_NETUTILS_PTPD_LOG_ENABLE
+#define CONFIG_NETUTILS_PTPD_LOG_ENABLE 0
+#endif
+
+#if CONFIG_NETUTILS_PTPD_LOG_ENABLE
+#define ptpdbg(format, ...)  ESP_LOGD(TAG, format, ##__VA_ARGS__)
 #define ptpinfo(format, ...) ESP_LOGI(TAG, format, ##__VA_ARGS__)
 #define ptpwarn(format, ...) ESP_LOGW(TAG, format, ##__VA_ARGS__)
-#define ptperr(format, ...) ESP_LOGE(TAG, format, ##__VA_ARGS__)
+#define ptperr(format, ...)  ESP_LOGE(TAG, format, ##__VA_ARGS__)
+#else
+#define ptpdbg(format, ...)  ((void)0)
+#define ptpinfo(format, ...) ((void)0)
+#define ptpwarn(format, ...) ((void)0)
+#define ptperr(format, ...)  ((void)0)
+#endif
 #else
 #ifdef CONFIG_NETUTILS_PTPD_DEBUG
 #  define ptpinfo _info
@@ -507,7 +520,7 @@ static bool is_selected_source_valid(FAR struct ptp_state_s *state)
   if (timespec_to_ms(&delta) > CONFIG_NETUTILS_PTPD_TIMEOUT_MS)
     {
 #ifdef ESP_PTP
-      ESP_LOGD(TAG, "Too long time since received packet\n");
+      ptpdbg("Too long time since received packet\n");
 #endif // ESP_PTP
       return false; /* Too long time since received packet */
     }
@@ -670,11 +683,11 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     ptperr("failed to get socket eth_handle %d\n", errno);
     return ERROR;
   }
-  ESP_LOGI(TAG, "L2TAP eth handle: %p", (void *)state->eth_handle);
+  ptpinfo("L2TAP eth handle: %p", (void *)state->eth_handle);
   esp_eth_clock_cfg_t clk_cfg = {
     .eth_hndl = state->eth_handle,
   };
-  ESP_LOGI(TAG, "esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
+  ptpinfo("esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
   esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
 
   // Enable time stamping in L2TAP
@@ -1345,15 +1358,15 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   //[tbd] currently only DM9058 supports frequency adjustment, need to add check for eth driver type here when more drivers are supported
   esp_err_t freq_adj_ret = esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ, &adj_ppb_i32);
   if (freq_adj_ret != ESP_OK) {
-    ESP_LOGW(TAG, "ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ failed: %s", esp_err_to_name(freq_adj_ret));
+    ptpwarn("ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ failed: %s", esp_err_to_name(freq_adj_ret));
   }
   state->remote_time_ns_prev = remote_time_ns;
   state->local_time_ns_prev = local_time_ns;
 
   // ptpinfo("remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
   // ptpinfo("offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
-  ESP_LOGW(TAG, "remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
-  ESP_LOGW(TAG, "offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
+  ptpdbg("remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
+  ESP_LOGW(TAG, "offset_ns %lli, adj %li, drift_acc %li, path_delay %ld ns\n", offset_ns, adj, state->offset_pi.drift_acc, state->path_delay_ns);
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),
   // we would get incorrect delay.
@@ -1601,7 +1614,7 @@ static int ptp_process_sync(FAR struct ptp_state_s *state,
     {
       /* This packet wasn't from the currently selected source */
 #ifdef ESP_PTP
-      ESP_LOGD(TAG, "This packet wasn't from the currently selected source");
+      ptpdbg("This packet wasn't from the currently selected source");
 #endif // ESP_PTP
       return OK;
     }
@@ -2068,9 +2081,9 @@ static int ptp_daemon(int argc, FAR char** argv)
 		            //to get 'emac->last_rx_timestamp'
 
                 if( esp_eth_clock_get_rx_time(state->eth_handle, &state->rxtime) == ESP_OK) {
-                  ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
+                  ptpdbg("RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
                 } else {
-                  ESP_LOGD(TAG, "get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
+                  ptpdbg("get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
                 }
 
                 #if 0
@@ -2155,7 +2168,7 @@ int ptpd_start(FAR const char *interface)
               (void *)interface, tskIDLE_PRIORITY + 2, NULL);
     return 1;
   }
-  ESP_LOGE(TAG, "Other instance of PTP is already running");
+  ptperr("Other instance of PTP is already running");
   return -1;
 #else
   int pid;
