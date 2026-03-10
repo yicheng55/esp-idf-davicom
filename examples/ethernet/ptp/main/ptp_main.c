@@ -141,6 +141,8 @@ IRAM_ATTR bool ts_callback(esp_eth_mediator_t *eth, void *user_args)
         esp_eth_clock_set_target_time(CLOCK_PTP_SYSTEM, &s_next_time);
     }
 
+    ESP_LOGI(TAG, "PTP Pulse! curr time: %llu.%09lu, next time: %llu.%09lu", curr_time.tv_sec, curr_time.tv_nsec,
+             s_next_time.tv_sec, s_next_time.tv_nsec);
     return false;
 }
 
