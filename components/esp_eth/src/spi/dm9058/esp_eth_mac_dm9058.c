@@ -1071,6 +1071,66 @@ static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM90
     return ESP_OK;
 }
 
+#define TIMES_TO_RST               10
+
+/**
+ * @brief  Process RX buffer fire time
+ *
+ * @param  histc   History counter array
+ * @param  csize   Size of array
+ * @param  i       Current index
+ * @param  rxb     RX buffer value
+ * @return         TIMES_TO_RST if reset needed, 0 otherwise
+ */
+static uint8_t ret_fire_time(uint8_t *histc, int csize, int i, uint8_t rxb)
+{
+//   printf(" _dm9058f rxb %02x (times %2d)%c\r\n",
+//          rxb, histc[i],
+//          (histc[i] == 2) ? '*' : ' ');
+
+  if (histc[i] >= (TIMES_TO_RST / 2))
+    ESP_LOGE(TAG, "RX buffer 0x%02x has been received %d times", rxb, histc[i]);
+
+  if (histc[i] >= TIMES_TO_RST)
+  {
+    // dm9058_show_rxbstatistic(histc, csize);
+    histc[i] = 1;
+    return TIMES_TO_RST;
+  }
+
+  return 0;
+}
+
+/**
+ * @brief  Evaluate RX buffer status and handle errors
+ *
+ * @param  rxb  RX buffer value to evaluate
+ * @return      0 if successful, error code otherwise
+ */
+//static
+uint16_t env_evaluate_rxb(uint8_t rxb)
+{
+  int i;
+  static uint8_t histc[254] = {0};
+  uint8_t times = 1;
+
+  for (i = 0; i < sizeof(histc); i++)
+  {
+    if (rxb == (i + 2))
+    {
+      histc[i]++;
+      times = ret_fire_time(histc, sizeof(histc), i, rxb);
+
+      if (times == 0)
+        return 0;
+
+      return 1;
+    }
+  }
+
+  return 1;
+}
+
 static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
 {
     esp_err_t ret = ESP_OK;
@@ -1087,8 +1147,11 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
             if (0x01 != rxbyte) {
-                ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
-                ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
+                if (env_evaluate_rxb(rxbyte)) {
+                    ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
+                    ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
+                }
+                return ESP_OK;
             }
             ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, (uint8_t *)&header, sizeof(header)), err, TAG, "read rx header failed");
             uint16_t rx_len = header.length_low + (header.length_high << 8);
