@@ -32,9 +32,9 @@
 #include "esp_eth_ptp_dm9058.h"
 
 static const char *TAG = "dm9058.mac";
-static const char *PTP_TAG = "dm9051.ptp";
+static const char *PTP_TAG = "dm9058.ptp";
 
-typedef bool (*dm9051_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
+typedef bool (*dm9058_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 
 #ifndef DM9058_RX_DEBUG
 #define DM9058_RX_DEBUG 1
@@ -92,7 +92,7 @@ typedef struct {
     bool flow_ctrl_enabled;
     uint8_t *rx_buffer;
     uint8_t hash_filter_cnt[DM9058_HASH_FILTER_TABLE_SIZE];
-    dm9051_ts_target_cb_t ts_target_exceed_cb_from_isr;
+    dm9058_ts_target_cb_t ts_target_exceed_cb_from_isr;
 	esp_eth_ptp_dm9058_time_t target_time;
     bool target_time_valid;
     esp_timer_handle_t ptp_timer;
@@ -163,7 +163,7 @@ static inline bool DM9058_spi_unlock(eth_spi_info_t *spi)
     return xSemaphoreGive(spi->lock) == pdTRUE;
 }
 
-static bool dm9051_time_reached(const esp_eth_ptp_dm9058_time_t *now, const esp_eth_ptp_dm9058_time_t *target)
+static bool dm9058_time_reached(const esp_eth_ptp_dm9058_time_t *now, const esp_eth_ptp_dm9058_time_t *target)
 {
     if (now->seconds > target->seconds) {
         return true;
@@ -174,7 +174,7 @@ static bool dm9051_time_reached(const esp_eth_ptp_dm9058_time_t *now, const esp_
     return now->nanoseconds >= target->nanoseconds;
 }
 
-static void dm9051_ptp_timer_start(esp32_DM9058_t *emac)
+static void dm9058_ptp_timer_start(esp32_DM9058_t *emac)
 {
     if (!emac->ptp_timer || emac->ptp_timer_started) {
         return;
@@ -186,7 +186,7 @@ static void dm9051_ptp_timer_start(esp32_DM9058_t *emac)
     }
 }
 
-static void dm9051_ptp_timer_stop(esp32_DM9058_t *emac)
+static void dm9058_ptp_timer_stop(esp32_DM9058_t *emac)
 {
     if (emac->ptp_timer && emac->ptp_timer_started) {
         esp_timer_stop(emac->ptp_timer);
@@ -843,7 +843,9 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         return ESP_OK;
     case ETH_MAC_DM9058_CMD_G_PTP_RX_TIME:
         ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_RX_TIME expects eth_mac_time_t*");
-        ESP_RETURN_ON_FALSE(emac->rx_timestamp_valid, ESP_ERR_NOT_FOUND, TAG, "rx timestamp not available");
+        if (!emac->rx_timestamp_valid) {
+            return ESP_ERR_NOT_FOUND;
+        }
         time->seconds = emac->last_rx_timestamp.seconds;
         time->nanoseconds = emac->last_rx_timestamp.nanoseconds;
         emac->rx_timestamp_valid = false;
@@ -858,9 +860,9 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
 //        emac->target_time_valid = true;
 //        if (DM9058_mutex_lock(emac)) {
 //            esp_eth_ptp_dm9058_time_t now = {0};
-//            esp_eth_ptp_dm9058_get_time(&emac->ptp, &now); //dm9051_ptp_get_time(emac, &now);
+//            esp_eth_ptp_dm9058_get_time(&emac->ptp, &now); //dm9058_ptp_get_time(emac, &now);
 //            DM9058_mutex_unlock(emac);
-//            if (dm9051_time_reached(&now, &emac->target_time)) {
+//            if (dm9058_time_reached(&now, &emac->target_time)) {
 //                emac->target_time_valid = false;
 //                if (emac->ts_target_exceed_cb_from_isr) {
 //                    emac->ts_target_exceed_cb_from_isr(emac->eth, NULL);
@@ -868,7 +870,7 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
 //                return ESP_OK;
 //            }
 //        }
-//        dm9051_ptp_timer_start(emac);
+//        dm9058_ptp_timer_start(emac);
 //        return ESP_OK;
     case ETH_MAC_DM9058_CMD_S_TARGET_CB:
         // Target callback not yet supported in DM9058
@@ -876,8 +878,8 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         return ESP_ERR_NOT_SUPPORTED;
 //		ESP_LOGW(PTP_TAG, "case ETH_MAC_DM9058_CMD_S_TARGET_CB of DM9058");
 //        ESP_RETURN_ON_FALSE(data, ESP_ERR_INVALID_ARG, PTP_TAG, "PTP set target callback invalid argument, cant' be NULL");
-//        emac->ts_target_exceed_cb_from_isr = (dm9051_ts_target_cb_t)data;
-//        dm9051_ptp_timer_start(emac);
+//        emac->ts_target_exceed_cb_from_isr = (dm9058_ts_target_cb_t)data;
+//        dm9058_ptp_timer_start(emac);
 //        return ESP_OK;
     default:
         return ESP_ERR_NOT_SUPPORTED;
@@ -1079,6 +1081,66 @@ static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM90
     return ESP_OK;
 }
 
+#define TIMES_TO_RST               10
+
+/**
+ * @brief  Process RX buffer fire time
+ *
+ * @param  histc   History counter array
+ * @param  csize   Size of array
+ * @param  i       Current index
+ * @param  rxb     RX buffer value
+ * @return         TIMES_TO_RST if reset needed, 0 otherwise
+ */
+static uint8_t ret_fire_time(uint8_t *histc, int csize, int i, uint8_t rxb)
+{
+//   printf(" _dm9058f rxb %02x (times %2d)%c\r\n",
+//          rxb, histc[i],
+//          (histc[i] == 2) ? '*' : ' ');
+
+  if (histc[i] >= (TIMES_TO_RST / 2))
+    ESP_LOGE(TAG, "RX buffer 0x%02x has been received %d times", rxb, histc[i]);
+
+  if (histc[i] >= TIMES_TO_RST)
+  {
+    // dm9058_show_rxbstatistic(histc, csize);
+    histc[i] = 1;
+    return TIMES_TO_RST;
+  }
+
+  return 0;
+}
+
+/**
+ * @brief  Evaluate RX buffer status and handle errors
+ *
+ * @param  rxb  RX buffer value to evaluate
+ * @return      0 if successful, error code otherwise
+ */
+//static
+uint16_t env_evaluate_rxb(uint8_t rxb)
+{
+  int i;
+  static uint8_t histc[254] = {0};
+  uint8_t times = 1;
+
+  for (i = 0; i < sizeof(histc); i++)
+  {
+    if (rxb == (i + 2))
+    {
+      histc[i]++;
+      times = ret_fire_time(histc, sizeof(histc), i, rxb);
+
+      if (times == 0)
+        return 0;
+
+      return 1;
+    }
+  }
+
+  return 1;
+}
+
 static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
 {
     esp_err_t ret = ESP_OK;
@@ -1097,8 +1159,11 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
             DM9058_RX_LOGD("rx ready: MRCMDX flag=0x%02x", rxbyte);
             if (0x01 != rxbyte) {
-                ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
-                ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
+                if (env_evaluate_rxb(rxbyte)) {
+                    ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
+                    ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
+                }
+                return ESP_OK;
             }
             ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, (uint8_t *)&header, sizeof(header)), err, TAG, "read rx header failed");
             uint16_t rx_len = header.length_low + (header.length_high << 8);
@@ -1107,14 +1172,6 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             if (rx_len <= ETH_MAX_PACKET_SIZE) {
                 ESP_GOTO_ON_ERROR(DM9058_handle_rx_ptp_timestamp(emac, &header), err, TAG, "handle rx ptp timestamp failed");
                 ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
-                if (rx_len >= 14) {
-                    DM9058_RX_LOGD("rx eth: dst=%02x:%02x:%02x:%02x:%02x:%02x src=%02x:%02x:%02x:%02x:%02x:%02x type=0x%02x%02x",
-                                   emac->rx_buffer[0], emac->rx_buffer[1], emac->rx_buffer[2],
-                                   emac->rx_buffer[3], emac->rx_buffer[4], emac->rx_buffer[5],
-                                   emac->rx_buffer[6], emac->rx_buffer[7], emac->rx_buffer[8],
-                                   emac->rx_buffer[9], emac->rx_buffer[10], emac->rx_buffer[11],
-                                   emac->rx_buffer[12], emac->rx_buffer[13]);
-                }
             } else {
                 /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
                 ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");

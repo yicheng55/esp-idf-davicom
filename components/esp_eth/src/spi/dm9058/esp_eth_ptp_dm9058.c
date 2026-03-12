@@ -2,6 +2,8 @@
 #include "esp_check.h"
 #include "esp_eth_ptp_dm9058.h"
 
+static const char *PTP_TAG = "dm9058.ptp";
+
 /* DM9058 PTP registers */
 #define DM9058_NSR   (0x01)
 #define DM9058_MRCMDX (0x70)
@@ -29,6 +31,7 @@
 #define DM9058_PTP_MAX_ADJUSTMENT         (0xEFFFFFFFU)
 
 /* 2^32 * 40 / 1e9 in Q16 format */
+#define V51_ADJ_FREQ_BASE_ADDEND     171.7987 /* Base addend for frequency adjustment */
 #define DM9058_PTP_FREQ_BASE_ADDEND_Q16   (11259106)
 
 /* Network protocol constants for packet parsing */
@@ -112,9 +115,9 @@ static esp_err_t dm9058_ptp_read_bytes(esp_eth_ptp_dm9058_t *ptp, uint8_t reg, u
 
 static esp_err_t dm9058_ptp_write_bytes(esp_eth_ptp_dm9058_t *ptp, uint8_t reg, const uint8_t *buffer, size_t len)
 {
-    if (ptp->ops.reg_burst_write) {
-        return ptp->ops.reg_burst_write(ptp->io_ctx, reg, buffer, len);
-    }
+    // if (ptp->ops.reg_burst_write) {
+    //     return ptp->ops.reg_burst_write(ptp->io_ctx, reg, buffer, len);
+    // }
     for (size_t i = 0; i < len; i++) {
         esp_err_t ret = ptp->ops.reg_write(ptp->io_ctx, reg, buffer[i]);
         if (ret != ESP_OK) {
@@ -283,7 +286,8 @@ esp_err_t esp_eth_ptp_dm9058_adj_freq(esp_eth_ptp_dm9058_t *ptp, int32_t adj_ppb
     esp_err_t ret = ESP_OK;
     bool locked = false;
     uint8_t raw[4];
-    int64_t signed_addend = ((int64_t)adj_ppb * (int64_t)DM9058_PTP_FREQ_BASE_ADDEND_Q16) >> 16;
+    // int64_t signed_addend = ((int64_t)adj_ppb * (int64_t)DM9058_PTP_FREQ_BASE_ADDEND_Q16) >> 16;
+    int64_t signed_addend = (int64_t)(adj_ppb * V51_ADJ_FREQ_BASE_ADDEND);
     int64_t delta = signed_addend - ptp->last_rate;
     uint32_t adjustment;
     uint8_t control_value;
@@ -633,6 +637,7 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx
     return ESP_OK;
 }
 
+#if 0
 esp_err_t esp_eth_ptp_dm9058_parse_rx_packet(esp_eth_ptp_dm9058_t *ptp,
                                              const uint8_t *rx_header, size_t rx_header_len,
                                              const uint8_t *rx_ts_buffer, size_t rx_ts_buffer_len,
@@ -676,6 +681,7 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_packet(esp_eth_ptp_dm9058_t *ptp,
 
     return ESP_OK;
 }
+#endif
 
 esp_err_t esp_eth_ptp_dm9058_tx_timestamp(esp_eth_ptp_dm9058_t *ptp, esp_eth_ptp_dm9058_time_t *time)
 {
@@ -688,15 +694,15 @@ esp_err_t esp_eth_ptp_dm9058_rx_timestamp(const uint8_t *rx_ts_buffer, size_t rx
     ESP_RETURN_ON_FALSE(rx_ts_len == 4 || rx_ts_len == 8, ESP_ERR_INVALID_ARG, "dm9058.ptp", "rx timestamp length must be 4 or 8");
 
     memset(time, 0, sizeof(*time));
-    time->nanoseconds = (uint32_t)rx_ts_buffer[0] |
-                        ((uint32_t)rx_ts_buffer[1] << 8) |
-                        ((uint32_t)rx_ts_buffer[2] << 16) |
-                        ((uint32_t)rx_ts_buffer[3] << 24);
+    time->nanoseconds = (uint32_t)rx_ts_buffer[7] |
+                        ((uint32_t)rx_ts_buffer[6] << 8) |
+                        ((uint32_t)rx_ts_buffer[5] << 16) |
+                        ((uint32_t)rx_ts_buffer[4] << 24);
     if (rx_ts_len == 8) {
-        time->seconds = (uint32_t)rx_ts_buffer[4] |
-                        ((uint32_t)rx_ts_buffer[5] << 8) |
-                        ((uint32_t)rx_ts_buffer[6] << 16) |
-                        ((uint32_t)rx_ts_buffer[7] << 24);
+        time->seconds = (uint32_t)rx_ts_buffer[3] |
+                        ((uint32_t)rx_ts_buffer[2] << 8) |
+                        ((uint32_t)rx_ts_buffer[1] << 16) |
+                        ((uint32_t)rx_ts_buffer[0] << 24);
     }
     return ESP_OK;
 }
