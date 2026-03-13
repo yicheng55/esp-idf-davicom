@@ -1116,7 +1116,7 @@ uint16_t env_evaluate_rxb(uint8_t rxb)
   static uint8_t histc[254] = {0};
   uint8_t times = 1;
 
-  ESP_LOGW(TAG, "env_evaluate_rxb called, rxb=0x%02, total_rx_count=%d  ", rxb, total_rx_count);
+  ESP_LOGW(TAG, "env_evaluate_rxb called, rxb=0x%02" PRIx8 ", total_rx_count=%d", rxb, total_rx_count);
 
   for (i = 0; i < sizeof(histc); i++)
   {
