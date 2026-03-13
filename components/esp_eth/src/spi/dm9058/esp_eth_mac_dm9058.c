@@ -1297,7 +1297,7 @@ static void esp32_DM9058_task(void *arg)
                             ESP_LOGE(TAG, "no mem for receive buffer");
                         } else {
                             memcpy(buffer, emac->rx_buffer, buf_len);
-                            ESP_LOGW(TAG, "receive len=%" PRIu32, buf_len);
+                            ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
                             /* pass the buffer to stack (e.g. TCP/IP layer) */
                             emac->eth->stack_input(emac->eth, buffer, buf_len);
                         }
