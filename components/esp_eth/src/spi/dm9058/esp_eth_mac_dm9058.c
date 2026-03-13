@@ -1074,69 +1074,65 @@ static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM90
 }
 
 #define TIMES_TO_RST               10
+#define RXB_HIST_BASE              2       /* valid unexpected rxb starts at 0x02 */
+#define RXB_HIST_SIZE              254     /* covers rxb 0x02..0xFF → index 0..253 */
+#define RXB_WARN_THRESHOLD         (TIMES_TO_RST / 2)
 
 /**
- * @brief  Process RX buffer fire time
+ * @brief Increment the per-rxb hit counter and decide whether a FIFO reset is needed.
  *
- * @param  histc   History counter array
- * @param  csize   Size of array
- * @param  i       Current index
- * @param  rxb     RX buffer value
- * @return         TIMES_TO_RST if reset needed, 0 otherwise
+ * @param histc  Hit-count table (one entry per valid rxb value).
+ * @param idx    Index into @p histc, already validated by caller.
+ * @param rxb    Original RX buffer byte (used only for logging).
+ * @return       true  – reset threshold reached; counter has been seeded back to 1.
+ *               false – still below threshold, no action required.
  */
-static uint8_t ret_fire_time(uint8_t *histc, int csize, int i, uint8_t rxb)
+static bool rxb_hit_limit(uint8_t *histc, size_t idx, uint8_t rxb)
 {
-//   printf(" _dm9058f rxb %02x (times %2d)%c\r\n",
-//          rxb, histc[i],
-//          (histc[i] == 2) ? '*' : ' ');
+    uint8_t cnt = ++histc[idx];
 
-  if (histc[i] >= (TIMES_TO_RST / 2))
-    ESP_LOGE(TAG, "RX buffer 0x%02x has been received %d times", rxb, histc[i]);
+    if (cnt >= RXB_WARN_THRESHOLD) {
+        ESP_LOGW(TAG, "RX buffer 0x%02x hit %u/%d times", rxb, cnt, TIMES_TO_RST);
+    }
 
-  if (histc[i] >= TIMES_TO_RST)
-  {
-    // dm9058_show_rxbstatistic(histc, csize);
-    histc[i] = 1;
-    return TIMES_TO_RST;
-  }
+    if (cnt >= TIMES_TO_RST) {
+        histc[idx] = 1; /* seed to 1 so the next occurrence is immediately counted */
+        return true;
+    }
 
-  return 0;
+    return false;
 }
 
 /**
- * @brief  Evaluate RX buffer status and handle errors
+ * @brief Evaluate an unexpected RX buffer byte and decide whether to flush the RX FIFO.
  *
- * @param  rxb  RX buffer value to evaluate
- * @return      0 if successful, error code otherwise
+ * rxb 0x01 is the normal "frame ready" marker and is handled upstream; this function
+ * is only called for other values.  Each distinct rxb value has its own hit counter.
+ * Once the counter reaches TIMES_TO_RST the caller must flush the RX FIFO.
+ *
+ * @param  rxb  Unexpected RX buffer byte.
+ * @return      0 – below threshold, caller may continue.
+ *              1 – threshold reached or rxb out of expected range; caller must flush.
  */
-//static
-uint16_t env_evaluate_rxb(uint8_t rxb)
+static uint16_t env_evaluate_rxb(uint8_t rxb)
 {
-  int i;
-  static uint8_t histc[254] = {0};
-  uint8_t times = 1;
+    static uint8_t histc[RXB_HIST_SIZE] = {0};
 
-  ESP_LOGW(TAG, "env_evaluate_rxb called, rxb=0x%02" PRIx8 ", total_rx_count=%d", rxb, total_rx_count);
-
-  for (i = 0; i < sizeof(histc); i++)
-  {
-    if (rxb == (i + 2))
-    {
-      histc[i]++;
-      times = ret_fire_time(histc, sizeof(histc), i, rxb);
-
-      if (times == 0) {
-        ESP_LOGW(TAG, "env_evaluate_rxb return 0 (rxb=0x%02" PRIx8 " histc[%d]=%d)", rxb, i, histc[i]);
-        return 0;
-      }
-
-      ESP_LOGW(TAG, "env_evaluate_rxb return 1 (rxb=0x%02" PRIx8 " accumulated, times=%d)", rxb, times);
-      return 1;
+    /* 0x00 is not a valid unexpected byte; 0x02..0xFF maps to histc[0..253] */
+    if (rxb < RXB_HIST_BASE) {
+        ESP_LOGE(TAG, "env_evaluate_rxb: rxb=0x%02" PRIx8 " out of expected range", rxb);
+        return 1;
     }
-  }
 
-  ESP_LOGW(TAG, "env_evaluate_rxb return 1 (invalid rxb=0x%02" PRIx8 ")", rxb);
-  return 1;
+    /* idx is always in [0, RXB_HIST_SIZE) because rxb is uint8_t and RXB_HIST_BASE=2 */
+    size_t idx = (size_t)(rxb - RXB_HIST_BASE);
+
+    if (rxb_hit_limit(histc, idx, rxb)) {
+        ESP_LOGE(TAG, "RX buffer 0x%02" PRIx8 " reached reset threshold, flushing FIFO", rxb);
+        return 1;
+    }
+
+    return 0;
 }
 
 static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
