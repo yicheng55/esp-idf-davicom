@@ -47,6 +47,8 @@ typedef bool (*dm9058_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 
 #define DM9058_HASH_FILTER_TABLE_SIZE   (64)
 
+static uint32_t total_rx_count = 0;
+
 typedef struct {
     uint8_t flag;        // 0 = no frame, 1 = frame received, others = possible memory pointer error or tcpip_checksum_offload status flag if enabled
     uint8_t status;      // Events occurred between this and previous frame (the same format as RSR)
@@ -704,10 +706,10 @@ static esp_err_t esp32_DM9058_set_speed(esp_eth_mac_t *mac, eth_speed_t speed)
     esp_err_t ret = ESP_OK;
     switch (speed) {
     case ETH_SPEED_10M:
-        ESP_LOGD(TAG, "working in 10Mbps");
+        ESP_LOGW(TAG, "working in 10Mbps");
         break;
     case ETH_SPEED_100M:
-        ESP_LOGD(TAG, "working in 100Mbps");
+        ESP_LOGW(TAG, "working in 100Mbps");
         break;
     default:
         ESP_GOTO_ON_FALSE(false, ESP_ERR_INVALID_ARG, err, TAG, "unknown speed");
@@ -723,10 +725,10 @@ static esp_err_t esp32_DM9058_set_duplex(esp_eth_mac_t *mac, eth_duplex_t duplex
     esp_err_t ret = ESP_OK;
     switch (duplex) {
     case ETH_DUPLEX_HALF:
-        ESP_LOGD(TAG, "working in half duplex");
+        ESP_LOGW(TAG, "working in half duplex");
         break;
     case ETH_DUPLEX_FULL:
-        ESP_LOGD(TAG, "working in full duplex");
+        ESP_LOGW(TAG, "working in full duplex");
         break;
     default:
         ESP_GOTO_ON_FALSE(false, ESP_ERR_INVALID_ARG, err, TAG, "unknown duplex");
@@ -786,7 +788,7 @@ static esp_err_t esp32_DM9058_set_peer_pause_ability(esp_eth_mac_t *mac, uint32_
         DM9058_enable_flow_ctrl(emac, true);
     } else {
         DM9058_enable_flow_ctrl(emac, false);
-        ESP_LOGD(TAG, "Flow control not enabled for the link");
+        ESP_LOGW(TAG, "Flow control not enabled for the link");
     }
     return ESP_OK;
 }
@@ -1114,6 +1116,8 @@ uint16_t env_evaluate_rxb(uint8_t rxb)
   static uint8_t histc[254] = {0};
   uint8_t times = 1;
 
+  ESP_LOGW(TAG, "env_evaluate_rxb called, rxb=0x%02, total_rx_count=%d  ", rxb, total_rx_count);
+
   for (i = 0; i < sizeof(histc); i++)
   {
     if (rxb == (i + 2))
@@ -1121,13 +1125,17 @@ uint16_t env_evaluate_rxb(uint8_t rxb)
       histc[i]++;
       times = ret_fire_time(histc, sizeof(histc), i, rxb);
 
-      if (times == 0)
+      if (times == 0) {
+        ESP_LOGW(TAG, "env_evaluate_rxb return 0 (rxb=0x%02" PRIx8 " histc[%d]=%d)", rxb, i, histc[i]);
         return 0;
+      }
 
+      ESP_LOGW(TAG, "env_evaluate_rxb return 1 (rxb=0x%02" PRIx8 " accumulated, times=%d)", rxb, times);
       return 1;
     }
   }
 
+  ESP_LOGW(TAG, "env_evaluate_rxb return 1 (invalid rxb=0x%02" PRIx8 ")", rxb);
   return 1;
 }
 
@@ -1146,6 +1154,7 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             /* dummy read, get the most updated data */
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
+            total_rx_count++;
             if (0x01 != rxbyte) {
                 if (env_evaluate_rxb(rxbyte)) {
                     ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
@@ -1292,7 +1301,7 @@ static void esp32_DM9058_task(void *arg)
                             ESP_LOGE(TAG, "no mem for receive buffer");
                         } else {
                             memcpy(buffer, emac->rx_buffer, buf_len);
-                            ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
+                            ESP_LOGW(TAG, "receive len=%" PRIu32, buf_len);
                             /* pass the buffer to stack (e.g. TCP/IP layer) */
                             emac->eth->stack_input(emac->eth, buffer, buf_len);
                         }
@@ -1359,7 +1368,7 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
 
     if (DM9058_config->custom_spi_driver.init != NULL && DM9058_config->custom_spi_driver.deinit != NULL
             && DM9058_config->custom_spi_driver.read != NULL && DM9058_config->custom_spi_driver.write != NULL) {
-        ESP_LOGD(TAG, "Using user's custom SPI Driver");
+        ESP_LOGW(TAG, "Using user's custom SPI Driver");
         emac->spi.init = DM9058_config->custom_spi_driver.init;
         emac->spi.deinit = DM9058_config->custom_spi_driver.deinit;
         emac->spi.read = DM9058_config->custom_spi_driver.read;
@@ -1367,7 +1376,7 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
         /* Custom SPI driver device init */
         ESP_GOTO_ON_FALSE((emac->spi.ctx = emac->spi.init(DM9058_config->custom_spi_driver.config)) != NULL, NULL, err, TAG, "SPI initialization failed");
     } else {
-        ESP_LOGD(TAG, "Using default SPI Driver");
+        ESP_LOGW(TAG, "Using default SPI Driver");
         emac->spi.init = DM9058_spi_init;
         emac->spi.deinit = DM9058_spi_deinit;
         emac->spi.read = DM9058_spi_read;
