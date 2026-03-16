@@ -1300,10 +1300,19 @@ static void esp32_DM9058_task(void *arg)
                         if (buffer == NULL) {
                             ESP_LOGE(TAG, "no mem for receive buffer");
                         } else {
+                            eth_mac_time_t *rx_info = NULL;
+                            eth_mac_time_t rx_ts = {0};
                             memcpy(buffer, emac->rx_buffer, buf_len);
                             ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
-                            /* pass the buffer to stack (e.g. TCP/IP layer) */
-                            emac->eth->stack_input(emac->eth, buffer, buf_len);
+                            if (emac->rx_timestamp_valid) {
+                                rx_ts.seconds = emac->last_rx_timestamp.seconds;
+                                rx_ts.nanoseconds = emac->last_rx_timestamp.nanoseconds;
+                                rx_info = &rx_ts;
+                                ESP_LOGD(TAG, "forward rx ts to stack: %lu.%09lu, len=%" PRIu32,
+                                         rx_ts.seconds, rx_ts.nanoseconds, buf_len);
+                            }
+                            /* pass the buffer and optional RX timestamp to upper stack */
+                            emac->eth->stack_input_info(emac->eth, buffer, buf_len, rx_info);
                         }
                     }
                 } else {
