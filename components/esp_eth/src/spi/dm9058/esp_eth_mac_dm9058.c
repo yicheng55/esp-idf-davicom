@@ -1214,6 +1214,9 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
                 if (emac->rx_timestamp_status_fallback) {
                     ESP_LOGW(TAG, "RXTS fallback path hit: frame=%s, len=%u, status=0x%02x",
                              dm9058_rx_frame_type_name(emac->rx_buffer, rx_len), rx_len, header.status);
+                } else {
+                    ESP_LOGD(TAG, "receive frame=%s, len=%u, status=0x%02x",
+                             dm9058_rx_frame_type_name(emac->rx_buffer, rx_len), rx_len, header.status);
                 }
             } else {
                 /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
