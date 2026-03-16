@@ -449,7 +449,7 @@ static esp_err_t DM9058_verify_id(esp32_DM9058_t *emac)
     ESP_GOTO_ON_FALSE(0x0A == id[1] && 0x46 == id[0], ESP_ERR_INVALID_VERSION, err, TAG, "wrong Vendor ID");
     ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_PIDL, &id[0]), err, TAG, "read PIDL failed");
     ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_PIDH, &id[1]), err, TAG, "read PIDH failed");
-    ESP_GOTO_ON_FALSE(0x90 == id[1] && 0x51 == id[0], ESP_ERR_INVALID_VERSION, err, TAG, "wrong Product ID");
+    ESP_GOTO_ON_FALSE(0x90 == id[1] && 0x58 == id[0], ESP_ERR_INVALID_VERSION, err, TAG, "wrong Product ID");
     return ESP_OK;
 err:
     return ret;
