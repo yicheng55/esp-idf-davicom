@@ -44,6 +44,9 @@ typedef bool (*dm9058_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 #define DM9058_RX_HDR_SIZE              (4)
 #define DM9058_RSR_RXTS_LEN             (1 << 2)
 #define DM9058_RSR_RXTS_EN              (1 << 5)
+#define DM9058_ETH_TYPE_PTP             0x88F7
+#define DM9058_ETH_HEADER_LEN           14
+#define DM9058_PTP_MSGTYPE_MASK         0x0F
 
 #define DM9058_HASH_FILTER_TABLE_SIZE   (64)
 
@@ -93,8 +96,45 @@ typedef struct {
     bool ptp_auto_process;
     bool ptp_two_step_mode;
     bool rx_timestamp_valid;
+    bool rx_timestamp_status_fallback;
     esp_eth_ptp_dm9058_time_t last_rx_timestamp;
 } esp32_DM9058_t;
+
+static const char *dm9058_ptp_msg_type_name(uint8_t msg_type)
+{
+    switch (msg_type & DM9058_PTP_MSGTYPE_MASK) {
+    case 0x0:
+        return "ptp-sync";
+    case 0x1:
+        return "ptp-delay-req";
+    case 0x8:
+        return "ptp-follow-up";
+    case 0x9:
+        return "ptp-delay-resp";
+    case 0xb:
+        return "ptp-announce";
+    default:
+        return "ptp-other";
+    }
+}
+
+static const char *dm9058_rx_frame_type_name(const uint8_t *frame, uint32_t len)
+{
+    if (frame == NULL || len < DM9058_ETH_HEADER_LEN) {
+        return "short-frame";
+    }
+
+    uint16_t eth_type = ((uint16_t)frame[12] << 8) | frame[13];
+    if (eth_type != DM9058_ETH_TYPE_PTP) {
+        return "non-ptp";
+    }
+
+    if (len <= DM9058_ETH_HEADER_LEN) {
+        return "ptp-unknown";
+    }
+
+    return dm9058_ptp_msg_type_name(frame[DM9058_ETH_HEADER_LEN]);
+}
 
 static void *DM9058_spi_init(const void *spi_config)
 {
@@ -1027,6 +1067,8 @@ err:
 
 static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM9058_rx_header_t *header)
 {
+    emac->rx_timestamp_status_fallback = false;
+
     if (!emac->ptp_auto_process || !emac->ptp.enabled) {
         emac->rx_timestamp_valid = false;
         return ESP_OK;
@@ -1045,6 +1087,7 @@ static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM90
     if (parse_ret == ESP_OK) {
         timestamp_len = rx_info.timestamp_available ? rx_info.timestamp_len : 0;
     } else if (header->status & DM9058_RSR_RXTS_EN) {
+        emac->rx_timestamp_status_fallback = true;
         timestamp_len = (header->status & DM9058_RSR_RXTS_LEN) ? 8 : 4;
     }
 
@@ -1168,6 +1211,10 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             if (rx_len <= ETH_MAX_PACKET_SIZE) {
                 ESP_GOTO_ON_ERROR(DM9058_handle_rx_ptp_timestamp(emac, &header), err, TAG, "handle rx ptp timestamp failed");
                 ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
+                if (emac->rx_timestamp_status_fallback) {
+                    ESP_LOGW(TAG, "RXTS fallback path hit: frame=%s, len=%u, status=0x%02x",
+                             dm9058_rx_frame_type_name(emac->rx_buffer, rx_len), rx_len, header.status);
+                }
             } else {
                 /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
                 ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
