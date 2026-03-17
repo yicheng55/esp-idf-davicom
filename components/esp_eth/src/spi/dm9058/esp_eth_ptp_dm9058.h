@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "esp_eth_mac.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,13 @@ typedef enum {
 } esp_eth_ptp_dm9058_msg_type_t;
 
 typedef struct {
+    bool is_ptp;
+    esp_eth_ptp_dm9058_transport_t transport;
+    esp_eth_ptp_dm9058_msg_type_t message_type;
+    bool two_step_flag;
+} esp_eth_ptp_dm9058_packet_info_t;
+
+typedef struct {
     bool enable_timestamp_capture;  /**< Enable TX timestamp capture (TCR bit 7) */
     bool enable_onestep_insert;     /**< Enable one-step timestamp insertion (TCR bit 6) */
 } esp_eth_ptp_dm9058_tx_config_t;
@@ -66,6 +74,19 @@ typedef struct {
     size_t timestamp_len;           /**< 0, 4, or 8 bytes */
 } esp_eth_ptp_dm9058_rx_info_t;
 
+typedef struct {
+    eth_mac_time_t timestamp;                       /**< Keep timestamp as the first field for stack_input_info compatibility */
+    bool timestamp_available;
+    bool timestamp_fallback;
+    bool is_ptp;
+    esp_eth_ptp_dm9058_transport_t transport;
+    esp_eth_ptp_dm9058_msg_type_t message_type;
+    bool two_step_flag;
+    uint16_t packet_len;
+    uint8_t rx_status;
+    size_t timestamp_len;
+} esp_eth_ptp_dm9058_rx_frame_info_t;
+
 esp_err_t esp_eth_ptp_dm9058_init(esp_eth_ptp_dm9058_t *ptp, void *io_ctx, const esp_eth_ptp_dm9058_ops_t *ops);
 esp_err_t esp_eth_ptp_dm9058_enable(esp_eth_ptp_dm9058_t *ptp, bool enable, esp_eth_ptp_dm9058_transport_t transport);
 esp_err_t esp_eth_ptp_dm9058_get_time(esp_eth_ptp_dm9058_t *ptp, esp_eth_ptp_dm9058_time_t *time);
@@ -74,6 +95,7 @@ esp_err_t esp_eth_ptp_dm9058_adj_time(esp_eth_ptp_dm9058_t *ptp, const esp_eth_p
 esp_err_t esp_eth_ptp_dm9058_adj_freq(esp_eth_ptp_dm9058_t *ptp, int32_t adj_ppb);
 esp_err_t esp_eth_ptp_dm9058_set_tx_mode(esp_eth_ptp_dm9058_t *ptp, esp_eth_ptp_dm9058_tx_mode_t mode);
 esp_err_t esp_eth_ptp_dm9058_enable_tx_timestamp(esp_eth_ptp_dm9058_t *ptp, bool enable);
+esp_err_t esp_eth_ptp_dm9058_parse_packet_info(const uint8_t *packet, size_t len, esp_eth_ptp_dm9058_packet_info_t *info);
 esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, bool two_step_mode, esp_eth_ptp_dm9058_tx_config_t *config);
 esp_err_t esp_eth_ptp_dm9058_prepare_tx(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet, size_t len, bool two_step_mode);
 esp_err_t esp_eth_ptp_dm9058_prepare_tx_locked(esp_eth_ptp_dm9058_t *ptp, const uint8_t *packet, size_t len, bool two_step_mode);
@@ -84,6 +106,12 @@ esp_err_t esp_eth_ptp_dm9058_prepare_tx_locked(esp_eth_ptp_dm9058_t *ptp, const 
  */
 esp_err_t esp_eth_ptp_dm9058_rx_ready(esp_eth_ptp_dm9058_t *ptp, bool *ready);
 esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx_header_len, uint16_t max_packet_len, esp_eth_ptp_dm9058_rx_info_t *info);
+esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const uint8_t *packet, size_t packet_len,
+                                                 const esp_eth_ptp_dm9058_rx_info_t *rx_info,
+                                                 const esp_eth_ptp_dm9058_time_t *timestamp,
+                                                 bool timestamp_valid,
+                                                 bool timestamp_fallback,
+                                                 esp_eth_ptp_dm9058_rx_frame_info_t *frame_info);
 esp_err_t esp_eth_ptp_dm9058_parse_rx_packet(esp_eth_ptp_dm9058_t *ptp,
                                              const uint8_t *rx_header, size_t rx_header_len,
                                              const uint8_t *rx_ts_buffer, size_t rx_ts_buffer_len,

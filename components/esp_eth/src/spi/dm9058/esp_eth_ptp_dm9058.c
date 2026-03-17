@@ -1,4 +1,5 @@
 #include <string.h>
+#include "sdkconfig.h"
 #include "esp_check.h"
 #include "esp_eth_ptp_dm9058.h"
 
@@ -393,70 +394,80 @@ err:
     return ret;
 }
 
-/**
- * @brief Helper function to check if packet is valid PTP
- */
-static bool is_valid_ptp_packet(const uint8_t *packet, size_t len)
+static bool dm9058_ptp_locate_header(const uint8_t *packet, size_t len,
+                                     const uint8_t **ptp_hdr,
+                                     esp_eth_ptp_dm9058_transport_t *transport)
 {
-    if (len < ETH_HLEN + 2) {
+    if (packet == NULL || ptp_hdr == NULL || transport == NULL || len < ETH_HLEN + 2) {
         return false;
     }
 
-    /* Check EtherType */
     uint16_t ethertype = ((uint16_t)packet[12] << 8) | packet[13];
+    *ptp_hdr = NULL;
+    *transport = ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4;
 
-    /* Layer 2 PTP (EtherType 0x88F7) */
     if (ethertype == ETH_TYPE_PTP) {
-        return len >= ETH_HLEN + 34;  /* Ethernet + PTP header */
+        if (len < ETH_HLEN + 34) {
+            return false;
+        }
+        *ptp_hdr = packet + ETH_HLEN;
+        *transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3;
+        return true;
     }
 
-    /* Layer 3/4 PTP over IPv4 UDP */
-    if (ethertype == ETH_TYPE_IPV4 && len >= ETH_HLEN + 20 + 8 + 34) {
-        uint8_t protocol = packet[ETH_HLEN + 9];
-        if (protocol == IP_PROTO_UDP) {
-            /* Check UDP destination port (319 or 320) */
-            uint16_t dest_port = ((uint16_t)packet[ETH_HLEN + 20 + 2] << 8) | packet[ETH_HLEN + 20 + 3];
-            return (dest_port == PTP_EVENT_PORT || dest_port == PTP_GENERAL_PORT);
+    if (ethertype == ETH_TYPE_IPV4) {
+        if (len < ETH_HLEN + 20 + 8 + 34) {
+            return false;
         }
+
+        uint8_t version_ihl = packet[ETH_HLEN];
+        uint8_t ihl = (version_ihl & 0x0F) * 4;
+        if ((version_ihl >> 4) != 4 || ihl < 20) {
+            return false;
+        }
+        if (len < ETH_HLEN + ihl + 8 + 34) {
+            return false;
+        }
+
+        uint8_t protocol = packet[ETH_HLEN + 9];
+        if (protocol != IP_PROTO_UDP) {
+            return false;
+        }
+
+        const uint8_t *udp_hdr = packet + ETH_HLEN + ihl;
+        uint16_t src_port = ((uint16_t)udp_hdr[0] << 8) | udp_hdr[1];
+        uint16_t dst_port = ((uint16_t)udp_hdr[2] << 8) | udp_hdr[3];
+        if (!((src_port == PTP_EVENT_PORT || src_port == PTP_GENERAL_PORT) ||
+              (dst_port == PTP_EVENT_PORT || dst_port == PTP_GENERAL_PORT))) {
+            return false;
+        }
+
+        *ptp_hdr = udp_hdr + 8;
+        *transport = ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4;
+        return true;
     }
 
     return false;
 }
 
-/**
- * @brief Get PTP header offset and message type
- */
-static bool get_ptp_info(const uint8_t *packet, size_t len, uint8_t *msg_type, bool *two_step_flag)
+esp_err_t esp_eth_ptp_dm9058_parse_packet_info(const uint8_t *packet, size_t len, esp_eth_ptp_dm9058_packet_info_t *info)
 {
-    if (!is_valid_ptp_packet(packet, len)) {
-        return false;
+    ESP_RETURN_ON_FALSE(packet != NULL && info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
+
+    memset(info, 0, sizeof(*info));
+
+    const uint8_t *ptp_hdr = NULL;
+    esp_eth_ptp_dm9058_transport_t transport;
+    if (!dm9058_ptp_locate_header(packet, len, &ptp_hdr, &transport)) {
+        return ESP_OK;
     }
 
-    uint16_t ethertype = ((uint16_t)packet[12] << 8) | packet[13];
-    const uint8_t *ptp_hdr;
-
-    if (ethertype == ETH_TYPE_PTP) {
-        /* Layer 2 PTP */
-        ptp_hdr = packet + ETH_HLEN;
-    } else if (ethertype == ETH_TYPE_IPV4) {
-        /* Layer 3/4 PTP over IPv4 */
-        ptp_hdr = packet + ETH_HLEN + 20 + 8;  /* Skip Ethernet + IP + UDP */
-    } else {
-        return false;
-    }
-
-    /* PTP header format:
-     * Byte 0: messageType (bits 0-3) and transportSpecific (bits 4-7)
-     * Byte 1: reserved and messageLength
-     * Bytes 6-7: flagField (big-endian)
-     */
-    *msg_type = ptp_hdr[0] & 0x0F;
-
-    /* Check two-step flag (bit 1 of flagField, which is bit 9 overall) */
     uint16_t flags = ((uint16_t)ptp_hdr[6] << 8) | ptp_hdr[7];
-    *two_step_flag = (flags & PTP_FLAG_TWO_STEP) != 0;
-
-    return true;
+    info->is_ptp = true;
+    info->transport = transport;
+    info->message_type = (esp_eth_ptp_dm9058_msg_type_t)(ptp_hdr[0] & 0x0F);
+    info->two_step_flag = (flags & PTP_FLAG_TWO_STEP) != 0;
+    return ESP_OK;
 }
 
 esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, bool two_step_mode,
@@ -468,10 +479,11 @@ esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, 
     config->enable_timestamp_capture = false;
     config->enable_onestep_insert = false;
 
-    uint8_t msg_type;
-    bool pkt_two_step_flag;
+    esp_eth_ptp_dm9058_packet_info_t packet_info = {0};
+    ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_packet_info(packet, len, &packet_info),
+                        "dm9058.ptp", "parse packet info failed");
 
-    if (!get_ptp_info(packet, len, &msg_type, &pkt_two_step_flag)) {
+    if (!packet_info.is_ptp) {
         /* Not a PTP packet, no timestamp needed */
         return ESP_OK;
     }
@@ -487,7 +499,7 @@ esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, 
      *   - For DELAY_REQ, optionally enable one-step insert
      */
 
-    switch (msg_type) {
+    switch (packet_info.message_type) {
     case ESP_ETH_PTP_DM9058_MSG_SYNC:
         if (!two_step_mode) {
             /* One-step SYNC: hardware inserts timestamp */
@@ -632,6 +644,41 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx
 
     if (info->timestamp_available) {
         info->timestamp_len = (rx_status & DM9058_RSR_RXTS_LEN) ? 8 : 4;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const uint8_t *packet, size_t packet_len,
+                                                 const esp_eth_ptp_dm9058_rx_info_t *rx_info,
+                                                 const esp_eth_ptp_dm9058_time_t *timestamp,
+                                                 bool timestamp_valid,
+                                                 bool timestamp_fallback,
+                                                 esp_eth_ptp_dm9058_rx_frame_info_t *frame_info)
+{
+    ESP_RETURN_ON_FALSE(frame_info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "missing frame info");
+    ESP_RETURN_ON_FALSE(rx_info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "missing rx info");
+
+    memset(frame_info, 0, sizeof(*frame_info));
+    frame_info->packet_len = (uint16_t)packet_len;
+    frame_info->rx_status = rx_info->rx_status;
+    frame_info->timestamp_len = rx_info->timestamp_len;
+    frame_info->timestamp_available = timestamp_valid;
+    frame_info->timestamp_fallback = timestamp_fallback;
+
+    if (timestamp_valid && timestamp != NULL) {
+        frame_info->timestamp.seconds = timestamp->seconds;
+        frame_info->timestamp.nanoseconds = timestamp->nanoseconds;
+    }
+
+    if (packet != NULL && packet_len > 0) {
+        esp_eth_ptp_dm9058_packet_info_t packet_info = {0};
+        ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_packet_info(packet, packet_len, &packet_info),
+                            "dm9058.ptp", "parse rx packet info failed");
+        frame_info->is_ptp = packet_info.is_ptp;
+        frame_info->transport = packet_info.transport;
+        frame_info->message_type = packet_info.message_type;
+        frame_info->two_step_flag = packet_info.two_step_flag;
     }
 
     return ESP_OK;
