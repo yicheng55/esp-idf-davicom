@@ -649,36 +649,20 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx
     return ESP_OK;
 }
 
-esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const uint8_t *packet, size_t packet_len,
-                                                 const esp_eth_ptp_dm9058_rx_info_t *rx_info,
-                                                 const esp_eth_ptp_dm9058_time_t *timestamp,
+esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const esp_eth_ptp_dm9058_time_t *timestamp,
                                                  bool timestamp_valid,
                                                  bool timestamp_fallback,
                                                  esp_eth_ptp_dm9058_rx_frame_info_t *frame_info)
 {
     ESP_RETURN_ON_FALSE(frame_info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "missing frame info");
-    ESP_RETURN_ON_FALSE(rx_info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "missing rx info");
 
     memset(frame_info, 0, sizeof(*frame_info));
-    frame_info->packet_len = (uint16_t)packet_len;
-    frame_info->rx_status = rx_info->rx_status;
-    frame_info->timestamp_len = rx_info->timestamp_len;
     frame_info->timestamp_available = timestamp_valid;
     frame_info->timestamp_fallback = timestamp_fallback;
 
     if (timestamp_valid && timestamp != NULL) {
         frame_info->timestamp.seconds = timestamp->seconds;
         frame_info->timestamp.nanoseconds = timestamp->nanoseconds;
-    }
-
-    if (packet != NULL && packet_len > 0) {
-        esp_eth_ptp_dm9058_packet_info_t packet_info = {0};
-        ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_packet_info(packet, packet_len, &packet_info),
-                            "dm9058.ptp", "parse rx packet info failed");
-        frame_info->is_ptp = packet_info.is_ptp;
-        frame_info->transport = packet_info.transport;
-        frame_info->message_type = packet_info.message_type;
-        frame_info->two_step_flag = packet_info.two_step_flag;
     }
 
     return ESP_OK;

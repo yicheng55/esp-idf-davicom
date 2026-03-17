@@ -1217,9 +1217,7 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
                                                                  &rx_timestamp_valid, &rx_timestamp_fallback),
                                   err, TAG, "handle rx ptp timestamp failed");
                 ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
-                uint16_t frame_len_no_crc = rx_len > ETH_CRC_LEN ? (rx_len - ETH_CRC_LEN) : rx_len;
-                ESP_GOTO_ON_ERROR(esp_eth_ptp_dm9058_build_rx_frame_info(emac->rx_buffer, frame_len_no_crc,
-                                                                         &rx_ptp_info, &rx_timestamp,
+                ESP_GOTO_ON_ERROR(esp_eth_ptp_dm9058_build_rx_frame_info(&rx_timestamp,
                                                                          rx_timestamp_valid, rx_timestamp_fallback,
                                                                          &emac->last_rx_frame_info),
                                   err, TAG, "build rx frame info failed");
@@ -1366,12 +1364,10 @@ static void esp32_DM9058_task(void *arg)
                             esp_eth_ptp_dm9058_rx_frame_info_t rx_frame_info = emac->last_rx_frame_info;
                             memcpy(buffer, emac->rx_buffer, buf_len);
                             ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
-                            if (rx_frame_info.timestamp_available || rx_frame_info.is_ptp) {
+                            if (rx_frame_info.timestamp_available) {
                                 rx_info = &rx_frame_info;
-                                ESP_LOGD(TAG, "forward rx meta to stack: ts=%lu.%09lu, ptp=%d, msg=%s, len=%" PRIu32,
+                                ESP_LOGD(TAG, "forward rx meta to stack: ts=%lu.%09lu, len=%" PRIu32,
                                          rx_frame_info.timestamp.seconds, rx_frame_info.timestamp.nanoseconds,
-                                         rx_frame_info.is_ptp,
-                                         dm9058_ptp_msg_type_name(rx_frame_info.message_type),
                                          buf_len);
                             }
                             /* pass the buffer and optional RX metadata to upper stack */

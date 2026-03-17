@@ -78,13 +78,6 @@ typedef struct {
     eth_mac_time_t timestamp;                       /**< Keep timestamp as the first field for stack_input_info compatibility */
     bool timestamp_available;
     bool timestamp_fallback;
-    bool is_ptp;
-    esp_eth_ptp_dm9058_transport_t transport;
-    esp_eth_ptp_dm9058_msg_type_t message_type;
-    bool two_step_flag;
-    uint16_t packet_len;
-    uint8_t rx_status;
-    size_t timestamp_len;
 } esp_eth_ptp_dm9058_rx_frame_info_t;
 
 esp_err_t esp_eth_ptp_dm9058_init(esp_eth_ptp_dm9058_t *ptp, void *io_ctx, const esp_eth_ptp_dm9058_ops_t *ops);
@@ -106,9 +99,7 @@ esp_err_t esp_eth_ptp_dm9058_prepare_tx_locked(esp_eth_ptp_dm9058_t *ptp, const 
  */
 esp_err_t esp_eth_ptp_dm9058_rx_ready(esp_eth_ptp_dm9058_t *ptp, bool *ready);
 esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx_header_len, uint16_t max_packet_len, esp_eth_ptp_dm9058_rx_info_t *info);
-esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const uint8_t *packet, size_t packet_len,
-                                                 const esp_eth_ptp_dm9058_rx_info_t *rx_info,
-                                                 const esp_eth_ptp_dm9058_time_t *timestamp,
+esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const esp_eth_ptp_dm9058_time_t *timestamp,
                                                  bool timestamp_valid,
                                                  bool timestamp_fallback,
                                                  esp_eth_ptp_dm9058_rx_frame_info_t *frame_info);
