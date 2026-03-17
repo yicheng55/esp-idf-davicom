@@ -50,8 +50,6 @@ typedef bool (*dm9058_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 
 #define DM9058_HASH_FILTER_TABLE_SIZE   (64)
 
-// static uint32_t total_rx_count = 0;
-
 typedef struct {
     uint8_t flag;        // 0 = no frame, 1 = frame received, others = possible memory pointer error or tcpip_checksum_offload status flag if enabled
     uint8_t status;      // Events occurred between this and previous frame (the same format as RSR)
@@ -1193,7 +1191,6 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
             /* dummy read, get the most updated data */
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
             ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
-            // total_rx_count++;
             if (0x01 != rxbyte) {
                 if (rxbyte == 0x00) {
                     /* 0x00 = no frame in RX FIFO; normal when NSR_RXRDY races MRCMDX update */
