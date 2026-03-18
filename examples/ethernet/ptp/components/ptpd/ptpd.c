@@ -274,7 +274,7 @@ struct ptp_state_s
 static const char *TAG = "ptpd";
 /* Set to 0 to fully disable ptpd logs in this file. */
 #ifndef CONFIG_NETUTILS_PTPD_LOG_ENABLE
-#define CONFIG_NETUTILS_PTPD_LOG_ENABLE 0
+#define CONFIG_NETUTILS_PTPD_LOG_ENABLE 1
 #endif
 
 #if CONFIG_NETUTILS_PTPD_LOG_ENABLE
@@ -2068,6 +2068,7 @@ static int ptp_daemon(int argc, FAR char** argv)
 
 #ifdef ESP_PTP
           ret = ptp_net_recv(state, &state->rxbuf, sizeof(state->rxbuf), &state->rxtime);
+          ptpdbg("Received packet, length %d, rxtime %lld.%09ld\n", (int)ret, (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
 #else
           ret = recvmsg(state->event_socket, &rxhdr, MSG_DONTWAIT);
 #endif // ESP_PTP
