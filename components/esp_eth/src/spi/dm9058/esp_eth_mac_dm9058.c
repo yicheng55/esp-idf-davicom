@@ -1219,6 +1219,7 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
                 ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
                 ESP_GOTO_ON_ERROR(esp_eth_ptp_dm9058_build_rx_frame_info(&rx_timestamp,
                                                                          rx_timestamp_valid, rx_timestamp_fallback,
+                                                                         emac->rx_buffer, rx_len,
                                                                          &emac->last_rx_frame_info),
                                   err, TAG, "build rx frame info failed");
                 if (emac->last_rx_frame_info.timestamp_fallback) {

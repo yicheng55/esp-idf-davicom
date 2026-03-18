@@ -102,6 +102,8 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx
 esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const esp_eth_ptp_dm9058_time_t *timestamp,
                                                  bool timestamp_valid,
                                                  bool timestamp_fallback,
+                                                 const uint8_t *packet,
+                                                 size_t packet_len,
                                                  esp_eth_ptp_dm9058_rx_frame_info_t *frame_info);
 esp_err_t esp_eth_ptp_dm9058_parse_rx_packet(esp_eth_ptp_dm9058_t *ptp,
                                              const uint8_t *rx_header, size_t rx_header_len,

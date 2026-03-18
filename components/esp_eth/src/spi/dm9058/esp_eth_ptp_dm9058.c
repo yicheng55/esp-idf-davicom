@@ -649,18 +649,43 @@ esp_err_t esp_eth_ptp_dm9058_parse_rx_header(const uint8_t *rx_header, size_t rx
     return ESP_OK;
 }
 
+/**
+ * @brief Returns true when the PTP message type requires an RX timestamp.
+ *
+ * Only Sync (T2 capture on slave) and Delay_Req (T4 capture on master)
+ * carry RX timestamps that matter for E2E delay-request-response.
+ */
+static bool dm9058_ptp_rx_needs_timestamp(const uint8_t *packet, size_t packet_len)
+{
+    if (packet == NULL || packet_len == 0) {
+        return false;
+    }
+    esp_eth_ptp_dm9058_packet_info_t info = {0};
+    if (esp_eth_ptp_dm9058_parse_packet_info(packet, packet_len, &info) != ESP_OK || !info.is_ptp) {
+        return false;
+    }
+    return info.message_type == ESP_ETH_PTP_DM9058_MSG_SYNC ||
+           info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ;
+}
+
 esp_err_t esp_eth_ptp_dm9058_build_rx_frame_info(const esp_eth_ptp_dm9058_time_t *timestamp,
                                                  bool timestamp_valid,
                                                  bool timestamp_fallback,
+                                                 const uint8_t *packet,
+                                                 size_t packet_len,
                                                  esp_eth_ptp_dm9058_rx_frame_info_t *frame_info)
 {
     ESP_RETURN_ON_FALSE(frame_info != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "missing frame info");
 
     memset(frame_info, 0, sizeof(*frame_info));
-    frame_info->timestamp_available = timestamp_valid;
     frame_info->timestamp_fallback = timestamp_fallback;
 
-    if (timestamp_valid && timestamp != NULL) {
+    /* Only set the timestamp valid for PTP message types that require an RX timestamp
+     * (Sync for T2 on slave, Delay_Req for T4 on master). */
+    bool needs_ts = timestamp_valid && dm9058_ptp_rx_needs_timestamp(packet, packet_len);
+    frame_info->timestamp_available = needs_ts;
+
+    if (needs_ts && timestamp != NULL) {
         frame_info->timestamp.seconds = timestamp->seconds;
         frame_info->timestamp.nanoseconds = timestamp->nanoseconds;
     }
