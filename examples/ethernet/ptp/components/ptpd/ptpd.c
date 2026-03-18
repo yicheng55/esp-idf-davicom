@@ -302,6 +302,8 @@ static const char *TAG = "ptpd";
 
 #ifdef ESP_PTP
 static struct ptp_state_s *s_state;
+static int ptp_gettime(FAR struct ptp_state_s *state,
+                       FAR struct timespec *ts);
 #endif
 
 /****************************************************************************
@@ -321,6 +323,11 @@ static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, 
   memcpy(eth_frame + sizeof(eth_hdr), ptp_msg, ptp_msg_len);
 }
 
+static bool ptp_is_valid_timespec(FAR const struct timespec *ts)
+{
+  return ts != NULL && ts->tv_sec >= 0 && ts->tv_nsec >= 0 && ts->tv_nsec < NSEC_PER_SEC;
+}
+
 static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
@@ -334,6 +341,8 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   } u;
 
   l2tap_extended_buff_t ptp_msg_ext_buff;
+
+  memset(u.info_recs_buff, 0, sizeof(u.info_recs_buff));
 
   ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
   ptp_msg_ext_buff.info_recs_buff = u.info_recs_buff;
@@ -349,7 +358,11 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   // check if write was successful, ts exists and ts_info is valid
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
     {
-      *ts = *(struct timespec *)ts_info->data;
+      struct timespec tx_ts = *(struct timespec *)ts_info->data;
+      if (ptp_is_valid_timespec(&tx_ts))
+        {
+          *ts = tx_ts;
+        }
     }
 
   return ret;
@@ -367,6 +380,8 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   } u;
   l2tap_extended_buff_t ptp_msg_ext_buff;
 
+  memset(u.info_recs_buff, 0, sizeof(u.info_recs_buff));
+
   ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
   ptp_msg_ext_buff.info_recs_buff = u.info_recs_buff;
   ptp_msg_ext_buff.buff = eth_frame;
@@ -381,9 +396,19 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   // check if read was successful, ts exists and ts_info is valid
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
     {
-      *ts = *(struct timespec *)ts_info->data;
-      ptpdbg("L2TAP rx ts: %lld.%09ld, len=%d",
-             (long long)ts->tv_sec, (long)ts->tv_nsec, ret);
+      struct timespec rx_ts = *(struct timespec *)ts_info->data;
+      if (ptp_is_valid_timespec(&rx_ts))
+        {
+          *ts = rx_ts;
+          ptpdbg("L2TAP rx ts: %lld.%09ld, len=%d",
+                 (long long)ts->tv_sec, (long)ts->tv_nsec, ret);
+        }
+      else
+        {
+          ptpwarn("Invalid L2TAP rx ts: %lld.%09ld, len=%d, fallback to current clock",
+                  (long long)rx_ts.tv_sec, (long)rx_ts.tv_nsec, ret);
+          ptp_gettime(state, ts);
+        }
     }
 
   memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
@@ -545,6 +570,27 @@ static void ptp_increment_sequence(FAR uint16_t *sequence_num,
 static uint16_t ptp_get_sequence(FAR const struct ptp_header_s *hdr)
 {
   return ((uint16_t)hdr->sequenceid[0] << 8) | hdr->sequenceid[1];
+}
+
+/* Convert PTP message type to readable string */
+
+static const char *ptp_msgtype_to_str(uint8_t msgtype)
+{
+  switch (msgtype & PTP_MSGTYPE_MASK)
+    {
+      case PTP_MSGTYPE_SYNC:
+        return "SYNC";
+      case PTP_MSGTYPE_DELAY_REQ:
+        return "DELAY_REQ";
+      case PTP_MSGTYPE_FOLLOW_UP:
+        return "FOLLOW_UP";
+      case PTP_MSGTYPE_DELAY_RESP:
+        return "DELAY_RESP";
+      case PTP_MSGTYPE_ANNOUNCE:
+        return "ANNOUNCE";
+      default:
+        return "UNKNOWN";
+    }
 }
 
 /* Get current system timestamp as a timespec
@@ -2068,7 +2114,23 @@ static int ptp_daemon(int argc, FAR char** argv)
 
 #ifdef ESP_PTP
           ret = ptp_net_recv(state, &state->rxbuf, sizeof(state->rxbuf), &state->rxtime);
-          ptpdbg("Received packet, length %d, rxtime %lld.%09ld\n", (int)ret, (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
+          if (ret >= (int)sizeof(struct ptp_header_s))
+            {
+              uint8_t msgtype = state->rxbuf.header.messagetype & PTP_MSGTYPE_MASK;
+              ptpdbg("Received packet, len=%d, type=%s(0x%02x), rxtime=%lld.%09ld",
+                     (int)ret,
+                     ptp_msgtype_to_str(msgtype),
+                     msgtype,
+                     (long long)state->rxtime.tv_sec,
+                     state->rxtime.tv_nsec);
+            }
+          else
+            {
+              ptpdbg("Received packet, len=%d, type=SHORT, rxtime=%lld.%09ld",
+                     (int)ret,
+                     (long long)state->rxtime.tv_sec,
+                     state->rxtime.tv_nsec);
+            }
 #else
           ret = recvmsg(state->event_socket, &rxhdr, MSG_DONTWAIT);
 #endif // ESP_PTP

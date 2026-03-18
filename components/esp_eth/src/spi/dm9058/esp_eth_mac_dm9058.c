@@ -1107,7 +1107,6 @@ static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM90
         esp_err_t decode_ret = esp_eth_ptp_dm9058_rx_timestamp(ts_buffer, timestamp_len, rx_timestamp);
         if (decode_ret == ESP_OK) {
             *timestamp_valid = true;
-            ESP_LOGD(TAG, "RX PTP timestamp: %lu.%09lu", rx_timestamp->seconds, rx_timestamp->nanoseconds);
         } else {
             ESP_LOGW(TAG, "decode rx timestamp failed: %s", esp_err_to_name(decode_ret));
         }
@@ -1226,8 +1225,9 @@ static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
                     ESP_LOGW(TAG, "RXTS fallback path hit: frame=%s, len=%u, status=0x%02x",
                              dm9058_rx_frame_type_name(emac->rx_buffer, rx_len), rx_len, header.status);
                 } else {
-                    ESP_LOGD(TAG, "receive frame=%s, len=%u, status=0x%02x",
-                             dm9058_rx_frame_type_name(emac->rx_buffer, rx_len), rx_len, header.status);
+                    ESP_LOGD(TAG, "receive frame=%s, len=%u, status=0x%02x, rxts=%lu.%09lu",
+                             dm9058_rx_frame_type_name(emac->rx_buffer, rx_len), rx_len, header.status,
+                             rx_timestamp.seconds, rx_timestamp.nanoseconds);
                 }
             } else {
                 /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
