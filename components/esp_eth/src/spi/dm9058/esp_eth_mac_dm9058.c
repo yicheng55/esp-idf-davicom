@@ -45,6 +45,13 @@ typedef bool (*dm9058_ts_target_cb_t)(esp_eth_mediator_t *eth, void *user_args);
 #define DM9058_RSR_RXTS_LEN             (1 << 2)
 #define DM9058_RSR_RXTS_EN              (1 << 5)
 
+#define DM9058_ETH_TYPE_IPV4            0x0800
+#define DM9058_ETH_TYPE_PTP             0x88F7
+#define DM9058_ETH_HEADER_LEN           14
+#define DM9058_IPPROTO_UDP              17
+#define DM9058_PTP_EVENT_PORT           319
+#define DM9058_PTP_GENERAL_PORT         320
+
 #define DM9058_HASH_FILTER_TABLE_SIZE   (64)
 
 typedef struct {
@@ -93,6 +100,47 @@ typedef struct {
     bool rx_timestamp_valid;
     esp_eth_ptp_dm9058_time_t last_rx_timestamp;
 } esp32_DM9058_t;
+
+typedef struct {
+    bool is_ptp;
+    uint8_t message_type;
+} dm9058_ptp_packet_info_t;
+
+static esp_err_t dm9058_parse_packet_info(const uint8_t *packet, size_t len, dm9058_ptp_packet_info_t *info)
+{
+    ESP_RETURN_ON_FALSE(packet != NULL && info != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid packet info args");
+    memset(info, 0, sizeof(*info));
+
+    ESP_RETURN_ON_FALSE(len >= DM9058_ETH_HEADER_LEN, ESP_ERR_INVALID_SIZE, TAG, "frame too short");
+    uint16_t ethertype = ((uint16_t)packet[12] << 8) | packet[13];
+    const uint8_t *ptp_hdr = NULL;
+
+    if (ethertype == DM9058_ETH_TYPE_PTP) {
+        ESP_RETURN_ON_FALSE(len >= DM9058_ETH_HEADER_LEN + 1, ESP_ERR_INVALID_SIZE, TAG, "ptp l2 frame too short");
+        ptp_hdr = packet + DM9058_ETH_HEADER_LEN;
+    } else if (ethertype == DM9058_ETH_TYPE_IPV4) {
+        ESP_RETURN_ON_FALSE(len >= DM9058_ETH_HEADER_LEN + 20 + 8 + 1, ESP_ERR_INVALID_SIZE, TAG, "ipv4 frame too short");
+        size_t ip_offset = DM9058_ETH_HEADER_LEN;
+        uint8_t ihl = (packet[ip_offset] & 0x0F) * 4;
+        ESP_RETURN_ON_FALSE(ihl >= 20, ESP_ERR_INVALID_RESPONSE, TAG, "invalid ipv4 ihl");
+        ESP_RETURN_ON_FALSE(len >= DM9058_ETH_HEADER_LEN + ihl + 8 + 1, ESP_ERR_INVALID_SIZE, TAG, "udp payload too short");
+        ESP_RETURN_ON_FALSE(packet[ip_offset + 9] == DM9058_IPPROTO_UDP, ESP_ERR_NOT_FOUND, TAG, "not udp ptp packet");
+
+        size_t udp_offset = DM9058_ETH_HEADER_LEN + ihl;
+        uint16_t sport = ((uint16_t)packet[udp_offset] << 8) | packet[udp_offset + 1];
+        uint16_t dport = ((uint16_t)packet[udp_offset + 2] << 8) | packet[udp_offset + 3];
+        bool ptp_port = (sport == DM9058_PTP_EVENT_PORT || sport == DM9058_PTP_GENERAL_PORT ||
+                         dport == DM9058_PTP_EVENT_PORT || dport == DM9058_PTP_GENERAL_PORT);
+        ESP_RETURN_ON_FALSE(ptp_port, ESP_ERR_NOT_FOUND, TAG, "not ptp udp packet");
+        ptp_hdr = packet + udp_offset + 8;
+    } else {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    info->is_ptp = true;
+    info->message_type = ptp_hdr[0] & 0x0F;
+    return ESP_OK;
+}
 
 static void *DM9058_spi_init(const void *spi_config)
 {
@@ -1291,10 +1339,24 @@ static void esp32_DM9058_task(void *arg)
                         if (buffer == NULL) {
                             ESP_LOGE(TAG, "no mem for receive buffer");
                         } else {
+                            void *rx_info = NULL;
+                            eth_mac_time_t rx_ts = {0};
+                            dm9058_ptp_packet_info_t info = {0};
                             memcpy(buffer, emac->rx_buffer, buf_len);
                             ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
-                            /* pass the buffer to stack (e.g. TCP/IP layer) */
-                            emac->eth->stack_input(emac->eth, buffer, buf_len);
+                            // Pass timestamp metadata only when available; otherwise keep info NULL.
+                            if (emac->rx_timestamp_valid &&
+                                dm9058_parse_packet_info(emac->rx_buffer, buf_len, &info) == ESP_OK &&
+                                info.is_ptp &&
+                                (info.message_type == ESP_ETH_PTP_DM9058_MSG_SYNC ||
+                                 info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ)) {
+                                rx_ts.seconds = emac->last_rx_timestamp.seconds;
+                                rx_ts.nanoseconds = emac->last_rx_timestamp.nanoseconds;
+                                rx_info = &rx_ts;
+                                ESP_LOGD(TAG, "forward rx ts to stack: %lu.%09lu", rx_ts.seconds, rx_ts.nanoseconds);
+                            }
+                            /* pass the buffer and optional rx info to stack */
+                            emac->eth->stack_input_info(emac->eth, buffer, buf_len, rx_info);
                         }
                     }
                 } else {

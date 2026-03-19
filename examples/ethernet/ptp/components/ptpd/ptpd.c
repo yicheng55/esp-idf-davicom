@@ -2080,11 +2080,11 @@ static int ptp_daemon(int argc, FAR char** argv)
                 //esp32_DM9058_custom_ioctl()
 		            //to get 'emac->last_rx_timestamp'
 
-                if( esp_eth_clock_get_rx_time(state->eth_handle, &state->rxtime) == ESP_OK) {
-                  ptpdbg("RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                } else {
-                  ptpdbg("get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
-                }
+                // if( esp_eth_clock_get_rx_time(state->eth_handle, &state->rxtime) == ESP_OK) {
+                //   ptpdbg("RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
+                // } else {
+                //   ptpdbg("get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
+                // }
 
                 #if 0
                 eth_mac_time_t rx_ts = {0};
