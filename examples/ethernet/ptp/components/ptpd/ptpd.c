@@ -380,10 +380,10 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 
   // check if read was successful, ts exists and ts_info is valid
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
-    {
-      *ts = *(struct timespec *)ts_info->data;
-      ESP_LOGI(TAG, "RX ts: %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
-    }
+  {
+    *ts = *(struct timespec *)ts_info->data;
+    ESP_LOGI(TAG, "RX ts: %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
+  }
 
   memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
 
