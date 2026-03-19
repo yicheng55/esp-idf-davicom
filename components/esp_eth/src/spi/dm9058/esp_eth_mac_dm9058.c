@@ -1342,11 +1342,12 @@ static void esp32_DM9058_task(void *arg)
                             void *rx_info = NULL;
                             eth_mac_time_t rx_ts = {0};
                             dm9058_ptp_packet_info_t info = {0};
+                            esp_err_t pkt_info_ret = dm9058_parse_packet_info(emac->rx_buffer, buf_len, &info);
                             memcpy(buffer, emac->rx_buffer, buf_len);
                             ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
                             // Pass timestamp metadata only when available; otherwise keep info NULL.
                             if (emac->rx_timestamp_valid &&
-                                dm9058_parse_packet_info(emac->rx_buffer, buf_len, &info) == ESP_OK &&
+                                pkt_info_ret == ESP_OK &&
                                 info.is_ptp &&
                                 (info.message_type == ESP_ETH_PTP_DM9058_MSG_SYNC ||
                                  info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ)) {
@@ -1354,6 +1355,12 @@ static void esp32_DM9058_task(void *arg)
                                 rx_ts.nanoseconds = emac->last_rx_timestamp.nanoseconds;
                                 rx_info = &rx_ts;
                                 ESP_LOGD(TAG, "forward rx ts to stack: %lu.%09lu", rx_ts.seconds, rx_ts.nanoseconds);
+                            } else if (emac->rx_timestamp_valid &&
+                                       pkt_info_ret == ESP_OK &&
+                                       info.is_ptp &&
+                                       info.message_type != ESP_ETH_PTP_DM9058_MSG_SYNC &&
+                                       info.message_type != ESP_ETH_PTP_DM9058_MSG_DELAY_REQ) {
+                                ESP_LOGD(TAG, "timestamp filtered out (non sync/delay_req), msg_type=0x%02x", info.message_type);
                             }
                             /* pass the buffer and optional rx info to stack */
                             emac->eth->stack_input_info(emac->eth, buffer, buf_len, rx_info);
