@@ -355,6 +355,18 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   return ret;
 }
 
+static const char *ptp_msgtype_name(uint8_t type)
+{
+  switch (type & PTP_MSGTYPE_MASK) {
+    case PTP_MSGTYPE_SYNC:       return "Sync";
+    case PTP_MSGTYPE_DELAY_REQ:  return "Delay_Req";
+    case PTP_MSGTYPE_FOLLOW_UP:  return "Follow_Up";
+    case PTP_MSGTYPE_DELAY_RESP: return "Delay_Resp";
+    case PTP_MSGTYPE_ANNOUNCE:   return "Announce";
+    default:                     return "Unknown";
+  }
+}
+
 static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
@@ -382,7 +394,8 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
   {
     *ts = *(struct timespec *)ts_info->data;
-    ESP_LOGI(TAG, "RX ts: %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
+    uint8_t msg_type = eth_frame[ETH_HEADER_LEN] & PTP_MSGTYPE_MASK;
+    ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type), (long long)ts->tv_sec, ts->tv_nsec);
   }
 
   memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
