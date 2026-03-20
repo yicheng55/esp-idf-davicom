@@ -104,7 +104,7 @@ int esp_eth_clock_settime(clockid_t clock_id, const struct timespec *tp);
 int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp);
 
 /**
- * @brief Get the PTP receive time
+ * @brief Get the PTP receive time via MAC pull ioctl
  *
  * @param eth_handle Ethernet handle
  * @param tp Pointer to the buffer to store the receive time
@@ -112,6 +112,8 @@ int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp);
  * @return
  *     - ESP_OK: Success
  *     - ESP_ERR_INVALID_ARG: Invalid argument
+ *     - ESP_ERR_NOT_SUPPORTED: RX timestamp is provided only via push metadata path
+ *       (e.g. DM9058 pure-push mode with L2TAP timestamps)
  *     - Other ESP_ERR_* codes: Hardware error
  */
 esp_err_t esp_eth_clock_get_rx_time(esp_eth_handle_t eth_handle, struct timespec *tp);
