@@ -1065,7 +1065,9 @@ err:
 static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM9058_rx_header_t *header,
                                                  esp_eth_ptp_dm9058_time_t *out_ts, bool *out_ts_valid)
 {
-    *out_ts_valid = false;
+    if (out_ts_valid) {
+        *out_ts_valid = false;
+    }
 
     if (!emac->ptp_auto_process || !emac->ptp.enabled) {
         return ESP_OK;
@@ -1095,7 +1097,7 @@ static esp_err_t DM9058_handle_rx_ptp_timestamp(esp32_DM9058_t *emac, const DM90
     ESP_RETURN_ON_FALSE(timestamp_len <= sizeof(ts_buffer), ESP_ERR_INVALID_SIZE, TAG, "timestamp too long");
     ESP_RETURN_ON_ERROR(DM9058_memory_read(emac, ts_buffer, timestamp_len), TAG, "read rx timestamp failed");
 
-    if (parse_ret == ESP_OK) {
+    if (parse_ret == ESP_OK && out_ts && out_ts_valid) {
         esp_err_t decode_ret = esp_eth_ptp_dm9058_rx_timestamp(ts_buffer, timestamp_len, out_ts);
         if (decode_ret == ESP_OK) {
             *out_ts_valid = true;
@@ -1168,6 +1170,14 @@ uint16_t env_evaluate_rxb(uint8_t rxb)
   return 1;
 }
 
+/**
+ * @brief Read one RX frame into the internal buffer.
+ *
+ * @param[out] out_ts Optional RX PTP timestamp output. Pass NULL when the caller
+ *                    uses a legacy receive path that cannot propagate metadata.
+ * @param[out] out_ts_valid Optional flag paired with out_ts. Pass NULL together
+ *                          with out_ts when timestamp metadata is not needed.
+ */
 static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size,
                                             esp_eth_ptp_dm9058_time_t *out_ts, bool *out_ts_valid)
 {
@@ -1217,6 +1227,13 @@ err:
     return ret;
 }
 
+/**
+ * @brief Legacy MAC receive callback required by `esp_eth_mac_t`.
+ *
+ * This path only returns frame bytes to the caller. Any optional RX timestamp
+ * metadata is intentionally discarded because the standard MAC receive API has
+ * no output channel for it.
+ */
 static esp_err_t esp32_DM9058_receive(esp_eth_mac_t *mac, uint8_t *buf, uint32_t *length)
 {
     esp_err_t ret = ESP_OK;
@@ -1224,11 +1241,8 @@ static esp_err_t esp32_DM9058_receive(esp_eth_mac_t *mac, uint8_t *buf, uint32_t
     uint16_t byte_count = 0;
     emac->packets_remain = false;
 
-    esp_eth_ptp_dm9058_time_t _ts = {0};
-    bool _ts_valid = false;
-
-    /* always read the full frame to preallocated memory to simplify subsequent rx fifo pointer operations */
-    ESP_GOTO_ON_ERROR(DM9058_frame_to_rx_buffer(emac, &byte_count, &_ts, &_ts_valid), err, TAG, "moving data to internal rx_buffer failed");
+    /* `esp_eth_mac_t.receive()` has no channel for RX timestamp metadata, so ignore it here. */
+    ESP_GOTO_ON_ERROR(DM9058_frame_to_rx_buffer(emac, &byte_count, NULL, NULL), err, TAG, "moving data to internal rx_buffer failed");
     /* silently return when no frame is waiting */
     if (!byte_count) {
         goto err;
@@ -1305,9 +1319,13 @@ static esp_err_t esp32_DM9058_deinit(esp_eth_mac_t *mac)
 }
 
 /**
- * @brief  Private receive helper for the rx task: reads one frame into emac->rx_buffer
- *         and returns the PTP hardware timestamp (if any) as local output parameters,
- *         avoiding any shared state on the emac struct.
+ * @brief RX-task helper that preserves optional PTP RX timestamp metadata.
+ *
+ * Reads one frame into `emac->rx_buffer` and returns the optional PTP hardware
+ * timestamp via local output parameters, avoiding any shared state on the emac
+ * struct. Unlike the legacy MAC receive callback, this path is used together
+ * with `stack_input_info()` so the task can forward both frame bytes and
+ * timestamp metadata to the upper layer.
  */
 static esp_err_t DM9058_task_receive(esp32_DM9058_t *emac, uint32_t *length,
                                      eth_mac_time_t *ts_out, bool *ts_valid_out)
