@@ -395,7 +395,7 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   {
     *ts = *(struct timespec *)ts_info->data;
     uint8_t msg_type = eth_frame[ETH_HEADER_LEN] & PTP_MSGTYPE_MASK;
-    ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type), (long long)ts->tv_sec, ts->tv_nsec);
+    // ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type), (long long)ts->tv_sec, ts->tv_nsec);
   }
 
   memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);

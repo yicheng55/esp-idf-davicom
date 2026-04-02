@@ -181,10 +181,13 @@ esp_err_t esp_eth_ptp_dm9058_enable(esp_eth_ptp_dm9058_t *ptp, bool enable, esp_
         ts_offset = 0x62;
         checksum_offset = 0x50;
         break;
+
+    case ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_1AS:
     case ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3:
         ts_offset = 0x32;
         checksum_offset = 0x20;
         break;
+        
     case ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4:
     default:
         break;
