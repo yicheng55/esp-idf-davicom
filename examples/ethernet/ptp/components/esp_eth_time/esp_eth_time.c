@@ -147,16 +147,20 @@ int esp_eth_clock_register_target_cb(clockid_t clock_id,
 esp_err_t esp_eth_clock_init(clockid_t clock_id, esp_eth_clock_cfg_t *cfg)
 {
     switch (clock_id) {
-    case CLOCK_PTP_SYSTEM:
+    case CLOCK_PTP_SYSTEM: {
         // PTP Clock is part of Ethernet system
-        bool ptp_enable = true;
+        esp_eth_ptp_dm9058_enable_config_t ptp_cfg = {
+            .enable    = true,
+            .transport = cfg->transport,
+        };
         ESP_LOGI(TAG, "clock_init cfg->eth_hndl: %p", (void *)cfg->eth_hndl);
-        if (esp_eth_ioctl(cfg->eth_hndl, ETH_MAC_ESP_CMD_PTP_ENABLE, &ptp_enable) != ESP_OK) {
+        if (esp_eth_ioctl(cfg->eth_hndl, ETH_MAC_ESP_CMD_PTP_ENABLE, &ptp_cfg) != ESP_OK) {
             return ESP_FAIL;
         }
         s_eth_hndl = cfg->eth_hndl;
         ESP_LOGI(TAG, "clock_init s_eth_hndl set to: %p", (void *)s_eth_hndl);
         break;
+    }
     default:
         return ESP_FAIL;
     }

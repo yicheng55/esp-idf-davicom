@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "esp_eth_driver.h"
+#include "esp_eth_mac_spi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,7 @@ typedef bool (*ts_target_exceed_cb_from_isr_t)(esp_eth_mediator_t *eth, void *us
  */
 typedef struct {
     esp_eth_handle_t eth_hndl;
+    esp_eth_ptp_dm9058_transport_t transport; /*!< PTP transport type (default: ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4 = 0) */
 } esp_eth_clock_cfg_t;
 
 /**

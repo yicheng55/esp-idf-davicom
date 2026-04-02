@@ -844,9 +844,12 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
     esp_eth_ptp_dm9058_time_t *time = (esp_eth_ptp_dm9058_time_t *)data;
 
     switch (cmd) {
-    case ETH_MAC_DM9058_CMD_PTP_ENABLE:
-        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_ENABLE expects bool*");
-        return esp_eth_ptp_dm9058_enable(&emac->ptp, *(bool *)data, ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4);
+    case ETH_MAC_DM9058_CMD_PTP_ENABLE: {
+        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_ENABLE expects esp_eth_ptp_dm9058_enable_config_t*");
+        esp_eth_ptp_dm9058_enable_config_t *cfg = (esp_eth_ptp_dm9058_enable_config_t *)data;
+        ESP_LOGD(TAG, "PTP_ENABLE: enable=%d, transport=%d", cfg->enable, cfg->transport);
+        return esp_eth_ptp_dm9058_enable(&emac->ptp, cfg->enable, cfg->transport);
+    }
     case ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS:
         ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_AUTO_PROCESS expects bool*");
         emac->ptp_auto_process = *(bool *)data;

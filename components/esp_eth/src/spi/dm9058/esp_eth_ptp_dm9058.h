@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "esp_eth_mac_spi.h"  // for esp_eth_ptp_dm9058_transport_t, esp_eth_ptp_dm9058_enable_config_t
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,13 +33,6 @@ typedef struct {
     bool enabled;
     int64_t last_rate;
 } esp_eth_ptp_dm9058_t;
-
-typedef enum {
-    ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4 = 0,
-    ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV6,
-    ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
-    ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_1AS,
-} esp_eth_ptp_dm9058_transport_t;
 
 typedef enum {
     ESP_ETH_PTP_DM9058_TX_MODE_TWO_STEP = 0,  /**< Two-step mode: timestamp captured but not inserted */

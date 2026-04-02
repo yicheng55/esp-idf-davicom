@@ -183,6 +183,24 @@ typedef enum {
 } eth_mac_dm9058_io_cmd_t;
 
 /**
+ * @brief PTP transport type for DM9058
+ */
+typedef enum {
+    ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4    = 0, /*!< PTP over UDP/IPv4 (default) */
+    ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV6,         /*!< PTP over UDP/IPv6 */
+    ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,        /*!< PTP over IEEE 802.3 Ethernet */
+    ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_1AS,      /*!< PTP over IEEE 802.1AS (gPTP) */
+} esp_eth_ptp_dm9058_transport_t;
+
+/**
+ * @brief Configuration passed to ETH_MAC_DM9058_CMD_PTP_ENABLE ioctl
+ */
+typedef struct {
+    bool enable;                                /*!< Enable or disable PTP */
+    esp_eth_ptp_dm9058_transport_t transport;   /*!< PTP transport type */
+} esp_eth_ptp_dm9058_enable_config_t;
+
+/**
  * @brief Generic ETH MAC command aliases for DM9058
  * These allow using generic ETH_MAC_ESP_CMD_* names with DM9058
  */
