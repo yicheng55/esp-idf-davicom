@@ -1509,8 +1509,13 @@ esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, 
     };
     ESP_GOTO_ON_FALSE(esp_eth_ptp_dm9058_init(&emac->ptp, emac, &ptp_ops) == ESP_OK, NULL, err, TAG, "init dm9058 ptp context failed");
     emac->ptp_auto_process = true;
+#ifdef CONFIG_ETH_DM9058_PTP_TWO_STEP_MODE
     emac->ptp_two_step_mode = true;
+#else
+    emac->ptp_two_step_mode = false;
+#endif
 
+    ESP_LOGD(TAG, "ptp_two_step_mode: %s", emac->ptp_two_step_mode ? "enabled" : "disabled");
     /* create DM9058 task */
     BaseType_t core_num = tskNO_AFFINITY;
     if (mac_config->flags & ETH_MAC_FLAG_PIN_TO_CORE) {

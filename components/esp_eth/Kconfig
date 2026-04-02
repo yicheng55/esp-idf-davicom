@@ -148,6 +148,18 @@ menu "Ethernet"
                 It's also integrated with a 10/100M PHY and MAC.
                 Select this to enable DM9058 driver.
 
+        config ETH_DM9058_PTP_TWO_STEP_MODE
+            bool "DM9058 PTP two-step timestamp mode"
+            depends on ETH_SPI_ETHERNET_DM9058
+            default y
+            help
+                If enabled, the DM9058 hardware captures TX timestamps for software
+                to read and embed in a separate FOLLOW_UP message (two-step mode).
+                If disabled, the hardware inserts the timestamp directly into the
+                SYNC packet at transmission time (one-step mode).
+                This setting must match the PTP daemon's NETUTILS_PTPD_TWOSTEP_SYNC
+                configuration to ensure correct PTP synchronization behavior.
+
         config ETH_SPI_ETHERNET_W5500
             bool "Use W5500 (MAC RAW)"
             help
