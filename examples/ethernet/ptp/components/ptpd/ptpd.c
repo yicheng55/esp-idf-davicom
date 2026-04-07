@@ -274,7 +274,7 @@ struct ptp_state_s
 static const char *TAG = "ptpd";
 /* Set to 0 to fully disable ptpd logs in this file. */
 #ifndef CONFIG_NETUTILS_PTPD_LOG_ENABLE
-#define CONFIG_NETUTILS_PTPD_LOG_ENABLE 0
+#define CONFIG_NETUTILS_PTPD_LOG_ENABLE 1
 #endif
 
 #if CONFIG_NETUTILS_PTPD_LOG_ENABLE
@@ -702,8 +702,10 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     .eth_hndl  = state->eth_handle,
     .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
   };
-  ptpinfo("esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
-  esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
+
+  // Note: clock_init will enable PTP HW timestamping in DM9058 driver, so it should be called before enabling time stamping in L2TAP to ensure timestamps are generated for received frames and can be retrieved in L2TAP.
+  // ptpinfo("esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
+  // esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
 
   // Enable time stamping in L2TAP
   if(ioctl(state->ptp_socket, L2TAP_S_TIMESTAMP_EN) < 0)
