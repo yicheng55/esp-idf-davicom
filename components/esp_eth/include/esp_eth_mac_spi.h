@@ -193,11 +193,25 @@ typedef enum {
 } esp_eth_ptp_dm9058_transport_t;
 
 /**
+ * @brief PTP clock role for DM9058
+ *
+ * Controls which message types receive TX timestamp hardware assistance.
+ * AUTO (0) keeps backward-compatible behavior: SYNC treated as master-sent,
+ * DELAY_REQ treated as slave-sent.
+ */
+typedef enum {
+    ESP_ETH_PTP_DM9058_ROLE_AUTO   = 0, /*!< BestMasterClock decides role (backward compatible) */
+    ESP_ETH_PTP_DM9058_ROLE_MASTER = 1, /*!< Force master role: SYNC timestamped, DELAY_REQ skipped */
+    ESP_ETH_PTP_DM9058_ROLE_SLAVE  = 2, /*!< Force slave role: DELAY_REQ timestamped, SYNC skipped */
+} esp_eth_ptp_dm9058_role_t;
+
+/**
  * @brief Configuration passed to ETH_MAC_DM9058_CMD_PTP_ENABLE ioctl
  */
 typedef struct {
     bool enable;                                /*!< Enable or disable PTP */
     esp_eth_ptp_dm9058_transport_t transport;   /*!< PTP transport type */
+    esp_eth_ptp_dm9058_role_t role;             /*!< PTP clock role (default 0 = AUTO) */
 } esp_eth_ptp_dm9058_enable_config_t;
 
 /**

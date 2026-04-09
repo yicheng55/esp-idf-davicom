@@ -158,7 +158,12 @@ void app_main(void)
 
     esp_eth_clock_cfg_t clock_cfg = {
         .eth_hndl  = s_eth_handles[0],
-        .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
+        .transport = ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4,
+#ifdef CONFIG_NETUTILS_PTPD_SERVER
+        .role      = ESP_ETH_PTP_DM9058_ROLE_MASTER,
+#else
+        .role      = ESP_ETH_PTP_DM9058_ROLE_SLAVE,
+#endif
     };
     esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clock_cfg);
 

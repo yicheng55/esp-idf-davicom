@@ -97,6 +97,7 @@ typedef struct {
     esp_eth_ptp_dm9058_t ptp;
     bool ptp_auto_process;
     bool ptp_two_step_mode;
+    esp_eth_ptp_dm9058_role_t ptp_role;  /*!< Mirror of ptp.role for debug/logging */
 } esp32_DM9058_t;
 
 typedef struct {
@@ -847,8 +848,12 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
     case ETH_MAC_DM9058_CMD_PTP_ENABLE: {
         ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_ENABLE expects esp_eth_ptp_dm9058_enable_config_t*");
         esp_eth_ptp_dm9058_enable_config_t *cfg = (esp_eth_ptp_dm9058_enable_config_t *)data;
-        ESP_LOGD(TAG, "PTP_ENABLE: enable=%d, transport=%d", cfg->enable, cfg->transport);
-        return esp_eth_ptp_dm9058_enable(&emac->ptp, cfg->enable, cfg->transport);
+        ESP_LOGD(TAG, "PTP_ENABLE: enable=%d, transport=%d, role=%d", cfg->enable, cfg->transport, cfg->role);
+        esp_err_t ptp_en_ret = esp_eth_ptp_dm9058_enable(&emac->ptp, cfg);
+        if (ptp_en_ret == ESP_OK) {
+            emac->ptp_role = cfg->role;
+        }
+        return ptp_en_ret;
     }
     case ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS:
         ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_AUTO_PROCESS expects bool*");

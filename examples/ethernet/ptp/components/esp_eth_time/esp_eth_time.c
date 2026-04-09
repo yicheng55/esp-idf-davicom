@@ -152,6 +152,7 @@ esp_err_t esp_eth_clock_init(clockid_t clock_id, esp_eth_clock_cfg_t *cfg)
         esp_eth_ptp_dm9058_enable_config_t ptp_cfg = {
             .enable    = true,
             .transport = cfg->transport,
+            .role      = cfg->role,
         };
         ESP_LOGI(TAG, "clock_init cfg->eth_hndl: %p", (void *)cfg->eth_hndl);
         if (esp_eth_ioctl(cfg->eth_hndl, ETH_MAC_ESP_CMD_PTP_ENABLE, &ptp_cfg) != ESP_OK) {

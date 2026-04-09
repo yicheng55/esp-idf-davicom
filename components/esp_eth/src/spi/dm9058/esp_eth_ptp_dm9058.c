@@ -34,6 +34,11 @@ static const char *PTP_TAG = "dm9058.ptp";
 #define V51_ADJ_FREQ_BASE_ADDEND     171.7987 /* Base addend for frequency adjustment */
 #define DM9058_PTP_FREQ_BASE_ADDEND_Q16   (11259106)
 
+/* DM9058_PTPMMP (0x64) mode values — named constants for clarity.
+ * Both currently write 0x12; update once datasheet bit-mapping is confirmed. */
+#define DM9058_PTPMMP_MASTER_MODE   (0x12)
+#define DM9058_PTPMMP_SLAVE_MODE    (0x12)
+
 /* Network protocol constants for packet parsing */
 #define ETH_HLEN              14
 #define ETH_TYPE_IPV4         0x0800
@@ -158,9 +163,10 @@ esp_err_t esp_eth_ptp_dm9058_init(esp_eth_ptp_dm9058_t *ptp, void *io_ctx, const
     return ESP_OK;
 }
 
-esp_err_t esp_eth_ptp_dm9058_enable(esp_eth_ptp_dm9058_t *ptp, bool enable, esp_eth_ptp_dm9058_transport_t transport)
+esp_err_t esp_eth_ptp_dm9058_enable(esp_eth_ptp_dm9058_t *ptp, const esp_eth_ptp_dm9058_enable_config_t *cfg)
 {
     ESP_RETURN_ON_FALSE(ptp != NULL && ptp->initialized, ESP_ERR_INVALID_STATE, "dm9058.ptp", "ptp not initialized");
+    ESP_RETURN_ON_FALSE(cfg != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "null cfg");
 
     esp_err_t ret = ESP_OK;
     bool locked = false;
@@ -169,14 +175,15 @@ esp_err_t esp_eth_ptp_dm9058_enable(esp_eth_ptp_dm9058_t *ptp, bool enable, esp_
 
     ESP_GOTO_ON_ERROR(dm9058_ptp_try_lock(ptp, &locked), err, "dm9058.ptp", "lock timeout");
 
-    if (!enable) {
+    if (!cfg->enable) {
         ret = ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPCW, 0x00);
         ESP_GOTO_ON_ERROR(ret, err, "dm9058.ptp", "disable ptp failed");
         ptp->enabled = false;
+        ptp->role = ESP_ETH_PTP_DM9058_ROLE_AUTO;
         goto err;
     }
 
-    switch (transport) {
+    switch (cfg->transport) {
     case ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV6:
         ts_offset = 0x62;
         checksum_offset = 0x50;
@@ -187,23 +194,30 @@ esp_err_t esp_eth_ptp_dm9058_enable(esp_eth_ptp_dm9058_t *ptp, bool enable, esp_
         ts_offset = 0x32;
         checksum_offset = 0x20;
         break;
-        
+
     case ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4:
     default:
         break;
     }
+
+    /* Select PTPMMP value based on role. Both constants are 0x12 until the
+     * DM9058 datasheet clarifies the exact bit-mapping for master/slave mode. */
+    uint8_t ptpmmp_val = (cfg->role == ESP_ETH_PTP_DM9058_ROLE_SLAVE)
+                         ? DM9058_PTPMMP_SLAVE_MODE
+                         : DM9058_PTPMMP_MASTER_MODE;
 
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPCR, 0x01), err, "dm9058.ptp", "ptp reset assert failed");
     dm9058_ptp_delay_ms(ptp, 1);
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPCR, 0x00), err, "dm9058.ptp", "ptp reset deassert failed");
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPCW, DM9058_PTP_TCR_ENABLE), err, "dm9058.ptp", "ptp enable failed");
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, 0x02, 0x00), err, "dm9058.ptp", "clear tx control failed");
-    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPMMP, 0x12), err, "dm9058.ptp", "set ptp mode failed");
+    ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPMMP, ptpmmp_val), err, "dm9058.ptp", "set ptp mode failed");
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPTX, 0x00), err, "dm9058.ptp", "disable one-step failed");
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPTSO, ts_offset), err, "dm9058.ptp", "set ts offset failed");
     ESP_GOTO_ON_ERROR(ptp->ops.reg_write(ptp->io_ctx, DM9058_PTPCSO, checksum_offset), err, "dm9058.ptp", "set checksum offset failed");
     ptp->enabled = true;
     ptp->last_rate = 0;
+    ptp->role = cfg->role;
 
 err:
     dm9058_ptp_unlock_if_needed(ptp, locked);
@@ -463,6 +477,7 @@ static bool get_ptp_info(const uint8_t *packet, size_t len, uint8_t *msg_type, b
 }
 
 esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, bool two_step_mode,
+                                               esp_eth_ptp_dm9058_role_t role,
                                                esp_eth_ptp_dm9058_tx_config_t *config)
 {
     ESP_RETURN_ON_FALSE(packet != NULL && config != NULL, ESP_ERR_INVALID_ARG, "dm9058.ptp", "invalid args");
@@ -479,43 +494,70 @@ esp_err_t esp_eth_ptp_dm9058_parse_tx_packet(const uint8_t *packet, size_t len, 
         return ESP_OK;
     }
 
-    /* Decision logic based on message type and mode:
+    /* Decision table based on (message_type, role, two_step_mode):
      *
-     * SYNC packet:
-     *   - If one-step mode (!two_step_mode): enable one-step insert
-     *   - If two-step mode: enable timestamp capture
+     * SYNC — only sent by master:
+     *   one-step: hardware inserts T1 directly → enable_onestep_insert
+     *   two-step: capture T1 for Follow_Up    → enable_timestamp_capture
+     *   SLAVE role: skip (slave never sends SYNC)
      *
-     * DELAY_REQ, PDELAY_REQ, PDELAY_RESP:
-     *   - Always enable timestamp capture
-     *   - For DELAY_REQ, optionally enable one-step insert
+     * DELAY_REQ — only sent by slave:
+     *   Slave needs TX timestamp to compute path delay → enable_timestamp_capture
+     *   One-step insert is NOT used here (slave does not embed its own TX time)
+     *   MASTER role: skip (master never sends DELAY_REQ)
+     *
+     * PDELAY_REQ — sent by either role:
+     *   Always capture TX timestamp for P2P delay calculation
+     *
+     * PDELAY_RESP — sent by either role:
+     *   two-step: capture responder TX timestamp → enable_timestamp_capture
+     *   one-step (non-slave): hardware inserts timestamp → enable_onestep_insert
+     *
+     * FOLLOW_UP, DELAY_RESP, ANNOUNCE — no new timestamp needed
      */
 
     switch (msg_type) {
     case ESP_ETH_PTP_DM9058_MSG_SYNC:
+        /* SYNC is master-only; skip if we know we are slave */
+        if (role == ESP_ETH_PTP_DM9058_ROLE_SLAVE) {
+            break;
+        }
         if (!two_step_mode) {
-            /* One-step SYNC: hardware inserts timestamp */
+            /* One-step: hardware inserts T1 into the outgoing SYNC frame */
             config->enable_onestep_insert = true;
         } else {
-            /* Two-step SYNC: capture timestamp for Follow_Up */
+            /* Two-step: capture T1 so it can be placed into Follow_Up */
             config->enable_timestamp_capture = true;
         }
         break;
 
     case ESP_ETH_PTP_DM9058_MSG_DELAY_REQ:
+        /* DELAY_REQ is slave-only; skip if we know we are master */
+        if (role == ESP_ETH_PTP_DM9058_ROLE_MASTER) {
+            break;
+        }
+        /* Capture TX timestamp so the slave can compute the request-to-master delay.
+         * One-step insertion is intentionally NOT enabled: the slave does not embed
+         * its own transmit time into the DELAY_REQ frame body. */
         config->enable_timestamp_capture = true;
-        /* Optionally enable one-step for slave */
-        config->enable_onestep_insert = true;
         break;
 
     case ESP_ETH_PTP_DM9058_MSG_PDELAY_REQ:
-    case ESP_ETH_PTP_DM9058_MSG_PDELAY_RESP:
-        /* P2P delay packets need timestamp capture */
+        /* P2P delay request always needs TX timestamp capture */
         config->enable_timestamp_capture = true;
         break;
 
+    case ESP_ETH_PTP_DM9058_MSG_PDELAY_RESP:
+        /* Pdelay responder: two-step captures, one-step inserts (unless slave-only) */
+        if (!two_step_mode && role != ESP_ETH_PTP_DM9058_ROLE_SLAVE) {
+            config->enable_onestep_insert = true;
+        } else {
+            config->enable_timestamp_capture = true;
+        }
+        break;
+
     default:
-        /* Other message types (FOLLOW_UP, DELAY_RESP, ANNOUNCE, etc.)
-         * don't need timestamp */
+        /* FOLLOW_UP, DELAY_RESP, ANNOUNCE — no timestamp action required */
         break;
     }
 
@@ -534,7 +576,7 @@ static esp_err_t esp_eth_ptp_dm9058_prepare_tx_internal(esp_eth_ptp_dm9058_t *pt
     uint8_t tcr_val = 0;
 
     /* Parse packet to determine TX configuration */
-    ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_tx_packet(packet, len, two_step_mode, &tx_config),
+    ESP_RETURN_ON_ERROR(esp_eth_ptp_dm9058_parse_tx_packet(packet, len, two_step_mode, ptp->role, &tx_config),
                         "dm9058.ptp", "parse packet failed");
 
     if (take_lock) {
