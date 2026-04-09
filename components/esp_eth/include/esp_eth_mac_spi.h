@@ -202,8 +202,11 @@ typedef struct {
 
 /**
  * @brief Generic ETH MAC command aliases for DM9058
- * These allow using generic ETH_MAC_ESP_CMD_* names with DM9058
+ * These allow using generic ETH_MAC_ESP_CMD_* names with DM9058.
+ * Guard against redefinition when esp_eth_mac_esp.h is also included
+ * (which defines the same names as enum members in eth_mac_esp_io_cmd_t).
  */
+#ifndef ETH_MAC_ESP_CMD_PTP_ENABLE
 #define ETH_MAC_ESP_CMD_PTP_ENABLE      ETH_MAC_DM9058_CMD_PTP_ENABLE
 #define ETH_MAC_ESP_CMD_PTP_AUTO_PROCESS ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS
 #define ETH_MAC_ESP_CMD_S_PTP_TIME      ETH_MAC_DM9058_CMD_S_PTP_TIME
@@ -214,6 +217,7 @@ typedef struct {
 #define ETH_MAC_ESP_CMD_G_PTP_RX_TIME   ETH_MAC_DM9058_CMD_G_PTP_RX_TIME
 #define ETH_MAC_ESP_CMD_S_TARGET_TIME   ETH_MAC_DM9058_CMD_S_TARGET_TIME
 #define ETH_MAC_ESP_CMD_S_TARGET_CB     ETH_MAC_DM9058_CMD_S_TARGET_CB
+#endif /* ETH_MAC_ESP_CMD_PTP_ENABLE */
 
 /**
  * @brief Default DM9058 specific configuration

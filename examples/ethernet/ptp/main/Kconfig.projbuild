@@ -2,6 +2,21 @@ menu "Example Configuration"
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
+    choice EXAMPLE_PTP_TRANSPORT
+        prompt "PTP transport type"
+        default EXAMPLE_PTP_TRANSPORT_IEEE_802_3
+        help
+            Select the PTP transport type.
+            IEEE 802.3: PTP over raw Ethernet (EtherType 0x88F7).
+            UDP IPv4: PTP over UDP/IPv4 (multicast 224.0.1.129, ports 319/320).
+
+        config EXAMPLE_PTP_TRANSPORT_IEEE_802_3
+            bool "IEEE 802.3 (Layer 2 Ethernet)"
+
+        config EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+            bool "UDP IPv4"
+    endchoice
+
     config EXAMPLE_PTP_PULSE_GPIO
         int "PPS GPIO number"
         range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX

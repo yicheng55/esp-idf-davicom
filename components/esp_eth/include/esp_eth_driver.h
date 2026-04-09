@@ -6,12 +6,15 @@
 #pragma once
 
 #include "esp_eth_com.h"
-#if CONFIG_ETH_USE_SPI_ETHERNET
-#include "esp_eth_mac_spi.h"
-#endif // CONFIG_ETH_USE_SPI_ETHERNET
+// Include esp_eth_mac_esp.h before esp_eth_mac_spi.h so that the
+// ETH_MAC_ESP_CMD_* enum members are defined before esp_eth_mac_spi.h
+// tries to define same-named macros (which would cause redeclaration errors).
 #if CONFIG_ETH_USE_ESP32_EMAC
 #include "esp_eth_mac_esp.h"
 #endif // CONFIG_ETH_USE_ESP32_EMAC
+#if CONFIG_ETH_USE_SPI_ETHERNET
+#include "esp_eth_mac_spi.h"
+#endif // CONFIG_ETH_USE_SPI_ETHERNET
 #if  CONFIG_ETH_USE_OPENETH
 #include "esp_eth_mac_openeth.h"
 #endif // CONFIG_ETH_USE_OPENETH

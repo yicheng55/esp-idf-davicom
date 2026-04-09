@@ -81,7 +81,20 @@
 
 #include "esp_eth_time.h"
 
-#define ETH_TYPE_PTP 0x88F7
+#define ETH_TYPE_PTP  0x88F7
+#define ETH_TYPE_IPV4 0x0800
+
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+#define PTP_ETH_FILTER_TYPE  ETH_TYPE_IPV4
+#define PTP_EVENT_PORT       319
+#define PTP_GENERAL_PORT     320
+#define IP_PROTO_UDP         17
+#define IP_HDR_LEN           20
+#define UDP_HDR_LEN          8
+#define UDP_IPV4_EXTRA_HDR   (IP_HDR_LEN + UDP_HDR_LEN)
+#else
+#define PTP_ETH_FILTER_TYPE  ETH_TYPE_PTP
+#endif
 
 #define SET_MAC_ADDR(addr, a, b, c, d, e, f) do { \
     addr[0] = a; addr[1] = b; addr[2] = c; \
@@ -321,10 +334,62 @@ static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, 
   memcpy(eth_frame + sizeof(eth_hdr), ptp_msg, ptp_msg_len);
 }
 
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+static void ptp_create_udp_ipv4_frame(struct ptp_state_s *state, uint8_t *frame,
+                                       void *ptp_msg, uint16_t ptp_msg_len,
+                                       uint16_t udp_dst_port)
+{
+  uint16_t udp_len = UDP_HDR_LEN + ptp_msg_len;
+  uint16_t ip_len  = IP_HDR_LEN + udp_len;
+
+  // Ethernet header — dst MAC = 01:00:5E:00:01:81 (IP multicast for 224.0.1.129)
+  uint8_t dst_mac[6] = {0x01, 0x00, 0x5E, 0x00, 0x01, 0x81};
+  memcpy(frame, dst_mac, 6);
+  memcpy(frame + 6, state->intf_hw_addr, 6);
+  frame[12] = 0x08; frame[13] = 0x00; // EtherType = IPv4
+
+  // IPv4 header (20 bytes, no options)
+  uint8_t *ip = frame + ETH_ADDR_LEN * 2 + 2; // frame + 14
+  ip[0]  = 0x45;                        // version=4, IHL=5
+  ip[1]  = 0x00;                        // DSCP/ECN
+  ip[2]  = (ip_len >> 8) & 0xFF;
+  ip[3]  = ip_len & 0xFF;
+  ip[4]  = 0; ip[5] = 0;               // identification
+  ip[6]  = 0x00; ip[7] = 0x00;        // flags, fragment offset
+  ip[8]  = 1;                           // TTL=1 (multicast)
+  ip[9]  = IP_PROTO_UDP;
+  ip[10] = 0; ip[11] = 0;              // checksum (0 = disabled)
+  memset(ip + 12, 0, 4);               // src IP = 0.0.0.0
+  ip[16] = 224; ip[17] = 0; ip[18] = 1; ip[19] = 129; // dst = 224.0.1.129
+
+  // UDP header (8 bytes)
+  uint8_t *udp = ip + IP_HDR_LEN;
+  udp[0] = (udp_dst_port >> 8) & 0xFF; // src port = dst port
+  udp[1] = udp_dst_port & 0xFF;
+  udp[2] = (udp_dst_port >> 8) & 0xFF;
+  udp[3] = udp_dst_port & 0xFF;
+  udp[4] = (udp_len >> 8) & 0xFF;
+  udp[5] = udp_len & 0xFF;
+  udp[6] = 0; udp[7] = 0;             // checksum disabled
+
+  // PTP payload
+  memcpy(udp + UDP_HDR_LEN, ptp_msg, ptp_msg_len);
+}
+#endif // CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+
 static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
-  uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+  uint8_t msg_type_nibble = ((struct ptp_header_s *)ptp_msg)->messagetype & PTP_MSGTYPE_MASK;
+  uint16_t udp_port = (msg_type_nibble < 8) ? PTP_EVENT_PORT : PTP_GENERAL_PORT;
+  uint16_t frame_len = ETH_ADDR_LEN * 2 + 2 + UDP_IPV4_EXTRA_HDR + ptp_msg_len;
+  uint8_t eth_frame[frame_len];
+  ptp_create_udp_ipv4_frame(state, eth_frame, ptp_msg, ptp_msg_len, udp_port);
+#else
+  uint16_t frame_len = ETH_HEADER_LEN + ptp_msg_len;
+  uint8_t eth_frame[frame_len];
   ptp_create_eth_frame(state, eth_frame, ptp_msg, ptp_msg_len);
+#endif
 
   // wrap "Info Records Buffer" into union to ensure proper alignment of data (this is typically needed when
   // accessing double word variables or structs containing double word variables)
@@ -338,7 +403,7 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
   ptp_msg_ext_buff.info_recs_buff = u.info_recs_buff;
   ptp_msg_ext_buff.buff = eth_frame;
-  ptp_msg_ext_buff.buff_len = sizeof(eth_frame);
+  ptp_msg_ext_buff.buff_len = frame_len;
 
   l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&ptp_msg_ext_buff);
   ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
@@ -369,7 +434,12 @@ static const char *ptp_msgtype_name(uint8_t type)
 
 static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
-  uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+  uint16_t frame_buf_len = ETH_ADDR_LEN * 2 + 2 + UDP_IPV4_EXTRA_HDR + ptp_msg_len;
+#else
+  uint16_t frame_buf_len = ETH_HEADER_LEN + ptp_msg_len;
+#endif
+  uint8_t eth_frame[frame_buf_len];
 
   // wrap "Info Records Buffer" into union to ensure proper alignment of data (this is typically needed when
   // accessing double word variables or structs containing double word variables)
@@ -382,7 +452,7 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
   ptp_msg_ext_buff.info_recs_buff = u.info_recs_buff;
   ptp_msg_ext_buff.buff = eth_frame;
-  ptp_msg_ext_buff.buff_len = sizeof(eth_frame);
+  ptp_msg_ext_buff.buff_len = frame_buf_len;
 
   l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&ptp_msg_ext_buff);
   ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
@@ -394,13 +464,30 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
   {
     *ts = *(struct timespec *)ts_info->data;
-    uint8_t msg_type = eth_frame[ETH_HEADER_LEN] & PTP_MSGTYPE_MASK;
-    // ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type), (long long)ts->tv_sec, ts->tv_nsec);
+    // ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(eth_frame[ETH_HEADER_LEN] & PTP_MSGTYPE_MASK), (long long)ts->tv_sec, ts->tv_nsec);
   }
 
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+  if (ret <= 0) { return ret; }
+  uint16_t eth_hlen = ETH_ADDR_LEN * 2 + 2; // 14
+  // Validate: EtherType = IPv4
+  uint16_t ethertype = ((uint16_t)eth_frame[12] << 8) | eth_frame[13];
+  if (ethertype != ETH_TYPE_IPV4) { return 0; }
+  // Validate: protocol = UDP
+  if (eth_frame[eth_hlen + 9] != IP_PROTO_UDP) { return 0; }
+  // Validate: UDP dst port = 319 or 320
+  uint16_t dst_port = ((uint16_t)eth_frame[eth_hlen + IP_HDR_LEN + 2] << 8)
+                    | eth_frame[eth_hlen + IP_HDR_LEN + 3];
+  if (dst_port != PTP_EVENT_PORT && dst_port != PTP_GENERAL_PORT) { return 0; }
+  uint16_t ptp_offset = eth_hlen + UDP_IPV4_EXTRA_HDR;
+  int ptp_len = ret - (int)(UDP_IPV4_EXTRA_HDR);
+  if (ptp_len <= 0) { return 0; }
+  memcpy(ptp_msg, &eth_frame[ptp_offset], ptp_len);
+  return ptp_len;
+#else
   memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
-
   return ret;
+#endif
 }
 
 static int64_t timespec_to_ns(FAR const struct timespec *ts)
@@ -685,7 +772,7 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   }
 
   // Set the Ethertype filter (frames with this type will be available through the state->tx_socket)
-  uint16_t eth_type_filter = ETH_TYPE_PTP;
+  uint16_t eth_type_filter = PTP_ETH_FILTER_TYPE;
   if (ioctl(state->ptp_socket, L2TAP_S_RCV_FILTER, &eth_type_filter) < 0)
   {
     ptperr("failed to set Ethertype filter: %d\n", errno);
@@ -717,12 +804,19 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   // get HW address
   esp_eth_ioctl(state->eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
 
-  // Add well-known PTP multicast destination MAC addresses to the filter
+  // Add multicast destination MAC addresses to the filter
   uint8_t dest_addr[ETH_ADDR_LEN];
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+  // IP multicast MAC for 224.0.1.129 → 01:00:5E:00:01:81
+  SET_MAC_ADDR(dest_addr, 0x01, 0x00, 0x5E, 0x00, 0x01, 0x81);
+  esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+#else
+  // Well-known PTP L2 multicast MACs
   SET_MAC_ADDR(dest_addr, 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00);
   esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
   SET_MAC_ADDR(dest_addr, 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E);
   esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+#endif
 
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
