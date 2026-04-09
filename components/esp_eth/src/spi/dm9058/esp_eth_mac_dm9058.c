@@ -97,6 +97,8 @@ typedef struct {
     esp_eth_ptp_dm9058_t ptp;
     bool ptp_auto_process;
     bool ptp_two_step_mode;
+    eth_mac_time_t last_rx_ts;
+    bool last_rx_ts_valid;
 } esp32_DM9058_t;
 
 typedef struct {
@@ -880,8 +882,14 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         time->nanoseconds = ptp_time.nanoseconds;
         return ESP_OK;
     case ETH_MAC_DM9058_CMD_G_PTP_RX_TIME:
-        /* RX timestamp is now delivered inline via stack_input_info; polling via ioctl is no longer supported. */
-        return ESP_ERR_NOT_SUPPORTED;
+        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_RX_TIME expects eth_mac_time_t*");
+        if (!emac->last_rx_ts_valid) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        time->seconds = emac->last_rx_ts.seconds;
+        time->nanoseconds = emac->last_rx_ts.nanoseconds;
+        emac->last_rx_ts_valid = false;
+        return ESP_OK;
     case ETH_MAC_DM9058_CMD_S_TARGET_TIME:
         // Target time not yet supported in DM9058
         ESP_LOGW(TAG, "Target time feature not yet implemented for DM9058");
@@ -1405,6 +1413,8 @@ static void esp32_DM9058_task(void *arg)
                                 (info.message_type == ESP_ETH_PTP_DM9058_MSG_SYNC ||
                                  info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ)) {
                                 rx_info = &rx_ts;
+                                emac->last_rx_ts = rx_ts;
+                                emac->last_rx_ts_valid = true;
                                 ESP_LOGD(TAG, "forward rx ts to stack: %lu.%09lu", rx_ts.seconds, rx_ts.nanoseconds);
                             } else if (rx_ts_valid &&
                                        pkt_info_ret == ESP_OK &&

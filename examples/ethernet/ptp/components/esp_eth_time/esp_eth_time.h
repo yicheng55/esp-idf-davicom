@@ -154,6 +154,13 @@ int esp_eth_clock_register_target_cb(clockid_t clock_id,
  */
 esp_err_t esp_eth_clock_init(clockid_t clock_id, esp_eth_clock_cfg_t *cfg);
 
+/**
+ * @brief Get the Ethernet handle registered via esp_eth_clock_init()
+ *
+ * @return Ethernet handle, or NULL if not initialized
+ */
+esp_eth_handle_t esp_eth_clock_get_handle(void);
+
 #ifdef __cplusplus
 }
 #endif

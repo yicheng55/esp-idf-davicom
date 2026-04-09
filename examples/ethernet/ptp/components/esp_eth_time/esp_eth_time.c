@@ -144,6 +144,11 @@ int esp_eth_clock_register_target_cb(clockid_t clock_id,
     return 0;
 }
 
+esp_eth_handle_t esp_eth_clock_get_handle(void)
+{
+    return s_eth_hndl;
+}
+
 esp_err_t esp_eth_clock_init(clockid_t clock_id, esp_eth_clock_cfg_t *cfg)
 {
     switch (clock_id) {

@@ -73,20 +73,22 @@
 #ifdef ESP_PTP
 #include "ptpd.h"
 #include "esp_eth_driver.h"
-#include "esp_vfs_l2tap.h"
 #include "semaphore.h"
 #include "esp_log.h"
 #include "esp_err.h"
-#include "lwip/prot/ethernet.h" // Ethernet headers
-
 #include "esp_eth_time.h"
+#include "esp_eth_mac_spi.h"
 
+#ifdef CONFIG_ESP_NETIF_L2_TAP
+/* L2TAP / IEEE 802.3 transport */
+#include "esp_vfs_l2tap.h"
+#include "lwip/prot/ethernet.h"
 #define ETH_TYPE_PTP 0x88F7
-
 #define SET_MAC_ADDR(addr, a, b, c, d, e, f) do { \
     addr[0] = a; addr[1] = b; addr[2] = c; \
     addr[3] = d; addr[4] = e; addr[5] = f; \
 } while(0)
+#endif /* CONFIG_ESP_NETIF_L2_TAP */
 
 #define ERROR ESP_FAIL
 #define OK ESP_OK
@@ -159,7 +161,12 @@ struct ptp_state_s
 
 #ifdef ESP_PTP
   uint8_t intf_hw_addr[ETH_ADDR_LEN];
-  int ptp_socket;
+#ifdef CONFIG_ESP_NETIF_L2_TAP
+  int ptp_socket;       /* L2TAP raw socket (IEEE 802.3 / EtherType 0x88F7) */
+#else
+  int event_socket;     /* UDP port 319 — time-critical event messages */
+  int info_socket;      /* UDP port 320 — general messages */
+#endif /* CONFIG_ESP_NETIF_L2_TAP */
   esp_eth_handle_t eth_handle;
 
   int64_t remote_time_ns_prev;
@@ -308,100 +315,138 @@ static struct ptp_state_s *s_state;
  * Private Functions
  ****************************************************************************/
 #ifdef ESP_PTP
-static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, void *ptp_msg, uint16_t ptp_msg_len)
+
+#ifdef CONFIG_ESP_NETIF_L2_TAP
+/* ── L2TAP / IEEE 802.3 transport ────────────────────────────────────────── */
+
+static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame,
+                                 void *ptp_msg, uint16_t ptp_msg_len)
 {
   struct eth_hdr eth_hdr = {
-    //.dest.addr = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E}, // TODO only for Pdelay_Req, Pdelay_Resp and Pdelay_Resp_Follow_Up
-    .dest.addr = {0x01, 0x1B, 0x19, 0x00, 0x00, 0x00}, // All except peer delay messages, ptp4l sends everything at this addr
-    .type = htons(ETH_TYPE_PTP)
+    .dest.addr = {0x01, 0x1B, 0x19, 0x00, 0x00, 0x00},
+    .type      = htons(ETH_TYPE_PTP)
   };
   memcpy(&eth_hdr.src.addr, state->intf_hw_addr, ETH_ADDR_LEN);
-
-  memcpy(eth_frame, &eth_hdr, sizeof(eth_hdr));
+  memcpy(eth_frame,                  &eth_hdr, sizeof(eth_hdr));
   memcpy(eth_frame + sizeof(eth_hdr), ptp_msg, ptp_msg_len);
 }
 
-static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
+static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg,
+                        uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
   ptp_create_eth_frame(state, eth_frame, ptp_msg, ptp_msg_len);
 
-  // wrap "Info Records Buffer" into union to ensure proper alignment of data (this is typically needed when
-  // accessing double word variables or structs containing double word variables)
   union {
-      uint8_t info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
-      l2tap_irec_hdr_t align;
+    uint8_t      info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
+    l2tap_irec_hdr_t align;
   } u;
-
-  l2tap_extended_buff_t ptp_msg_ext_buff;
-
-  ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
-  ptp_msg_ext_buff.info_recs_buff = u.info_recs_buff;
-  ptp_msg_ext_buff.buff = eth_frame;
-  ptp_msg_ext_buff.buff_len = sizeof(eth_frame);
-
-  l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&ptp_msg_ext_buff);
-  ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
+  l2tap_extended_buff_t ext_buff = {
+    .info_recs_len  = sizeof(u.info_recs_buff),
+    .info_recs_buff = u.info_recs_buff,
+    .buff           = eth_frame,
+    .buff_len       = sizeof(eth_frame),
+  };
+  l2tap_irec_hdr_t *ts_info  = L2TAP_IREC_FIRST(&ext_buff);
+  ts_info->len  = L2TAP_IREC_LEN(sizeof(struct timespec));
   ts_info->type = L2TAP_IREC_TIME_STAMP;
 
-  int ret = write(state->ptp_socket, &ptp_msg_ext_buff, 0);
-
-  // check if write was successful, ts exists and ts_info is valid
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
-    {
-      *ts = *(struct timespec *)ts_info->data;
-    }
-
+  int ret = write(state->ptp_socket, &ext_buff, 0);
+  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP) {
+    *ts = *(struct timespec *)ts_info->data;
+  }
   return ret;
 }
 
-static const char *ptp_msgtype_name(uint8_t type)
-{
-  switch (type & PTP_MSGTYPE_MASK) {
-    case PTP_MSGTYPE_SYNC:       return "Sync";
-    case PTP_MSGTYPE_DELAY_REQ:  return "Delay_Req";
-    case PTP_MSGTYPE_FOLLOW_UP:  return "Follow_Up";
-    case PTP_MSGTYPE_DELAY_RESP: return "Delay_Resp";
-    case PTP_MSGTYPE_ANNOUNCE:   return "Announce";
-    default:                     return "Unknown";
-  }
-}
-
-static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
+static int ptp_net_recv(FAR struct ptp_state_s *state,
+                        void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
 
-  // wrap "Info Records Buffer" into union to ensure proper alignment of data (this is typically needed when
-  // accessing double word variables or structs containing double word variables)
   union {
-      uint8_t info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
-      l2tap_irec_hdr_t align;
+    uint8_t      info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
+    l2tap_irec_hdr_t align;
   } u;
-  l2tap_extended_buff_t ptp_msg_ext_buff;
-
-  ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
-  ptp_msg_ext_buff.info_recs_buff = u.info_recs_buff;
-  ptp_msg_ext_buff.buff = eth_frame;
-  ptp_msg_ext_buff.buff_len = sizeof(eth_frame);
-
-  l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&ptp_msg_ext_buff);
-  ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
+  l2tap_extended_buff_t ext_buff = {
+    .info_recs_len  = sizeof(u.info_recs_buff),
+    .info_recs_buff = u.info_recs_buff,
+    .buff           = eth_frame,
+    .buff_len       = sizeof(eth_frame),
+  };
+  l2tap_irec_hdr_t *ts_info  = L2TAP_IREC_FIRST(&ext_buff);
+  ts_info->len  = L2TAP_IREC_LEN(sizeof(struct timespec));
   ts_info->type = L2TAP_IREC_TIME_STAMP;
 
-  int ret = read(state->ptp_socket, &ptp_msg_ext_buff, 0);
-
-  // check if read was successful, ts exists and ts_info is valid
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
-  {
+  int ret = read(state->ptp_socket, &ext_buff, 0);
+  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP) {
     *ts = *(struct timespec *)ts_info->data;
-    uint8_t msg_type = eth_frame[ETH_HEADER_LEN] & PTP_MSGTYPE_MASK;
-    // ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type), (long long)ts->tv_sec, ts->tv_nsec);
   }
-
-  memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
-
+  if (ret > 0) {
+    memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
+  }
   return ret;
 }
+
+#else /* !CONFIG_ESP_NETIF_L2_TAP — UDP/IPv4 transport */
+/* ── UDP/IPv4 transport ───────────────────────────────────────────────────── */
+
+/* Event msgs (id < 8): Sync(0), Delay_Req(1) → port 319
+ * General msgs (id ≥ 8): Follow_Up(8), Delay_Resp(9), Announce(11) → port 320
+ */
+static inline bool ptp_msg_is_event(const void *ptp_msg)
+{
+  return (((const uint8_t *)ptp_msg)[0] & PTP_MSGTYPE_MASK) < 8;
+}
+
+static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg,
+                        uint16_t ptp_msg_len, struct timespec *ts)
+{
+  bool     is_event = ptp_msg_is_event(ptp_msg);
+  int      sock     = is_event ? state->event_socket : state->info_socket;
+  uint16_t port     = is_event ? PTP_UDP_PORT_EVENT  : PTP_UDP_PORT_INFO;
+
+  struct sockaddr_in dest;
+  memset(&dest, 0, sizeof(dest));
+  dest.sin_family      = AF_INET;
+  dest.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  dest.sin_port        = htons(port);
+
+  int ret = sendto(sock, ptp_msg, ptp_msg_len, 0,
+                   (struct sockaddr *)&dest, sizeof(dest));
+
+  /* Retrieve hardware TX timestamp for event messages only */
+  if (ret > 0 && ts && is_event) {
+    eth_mac_time_t tx_ts = {0};
+    if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_TX_TIME, &tx_ts) == ESP_OK
+        && (tx_ts.seconds > 0 || tx_ts.nanoseconds > 0)) {
+      ts->tv_sec  = (time_t)tx_ts.seconds;
+      ts->tv_nsec = (long)tx_ts.nanoseconds;
+    }
+  }
+  return ret;
+}
+
+/* sock     : which socket to read from (event_socket or info_socket)
+ * get_ts   : true → retrieve hardware RX timestamp (with fallback)
+ */
+static int ptp_net_recv(FAR struct ptp_state_s *state, int sock, bool get_ts,
+                        void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
+{
+  struct sockaddr_in src;
+  socklen_t src_len = sizeof(src);
+
+  int ret = recvfrom(sock, ptp_msg, ptp_msg_len, MSG_DONTWAIT,
+                     (struct sockaddr *)&src, &src_len);
+
+  if (ret > 0 && ts && get_ts) {
+    if (esp_eth_clock_get_rx_time(state->eth_handle, ts) != ESP_OK) {
+      ptp_gettime(state, ts);   /* fallback to current PTP clock */
+    }
+  }
+  return ret;
+}
+
+#endif /* CONFIG_ESP_NETIF_L2_TAP */
 
 static int64_t timespec_to_ns(FAR const struct timespec *ts)
 {
@@ -670,69 +715,132 @@ static int ptp_getrxtime(FAR struct ptp_state_s *state,
 static int ptp_initialize_state(FAR struct ptp_state_s *state,
                                 FAR const char *interface)
 {
+#ifdef CONFIG_ESP_NETIF_L2_TAP
+/* ── L2TAP / IEEE 802.3 ───────────────────────────────────────────────────── */
   state->ptp_socket = open("/dev/net/tap", 0);
-  if (state->ptp_socket < 0)
-  {
-      ptperr("Failed to create tx socket: %d\n", errno);
-      return ERROR;
-  }
-
-  // Set Ethernet interface on which to get raw frames
-  if (ioctl(state->ptp_socket, L2TAP_S_INTF_DEVICE, interface) < 0)
-  {
-    ptperr("failed to set network interface at socket: %d\n", errno);
+  if (state->ptp_socket < 0) {
+    ptperr("Failed to open L2TAP socket: %d\n", errno);
     return ERROR;
   }
-
-  // Set the Ethertype filter (frames with this type will be available through the state->tx_socket)
+  if (ioctl(state->ptp_socket, L2TAP_S_INTF_DEVICE, interface) < 0) {
+    ptperr("failed to set network interface: %d\n", errno);
+    return ERROR;
+  }
   uint16_t eth_type_filter = ETH_TYPE_PTP;
-  if (ioctl(state->ptp_socket, L2TAP_S_RCV_FILTER, &eth_type_filter) < 0)
-  {
-    ptperr("failed to set Ethertype filter: %d\n", errno);
+  if (ioctl(state->ptp_socket, L2TAP_S_RCV_FILTER, &eth_type_filter) < 0) {
+    ptperr("failed to set EtherType filter: %d\n", errno);
     return ERROR;
   }
-  // Enable time stamping in driver
-  if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &state->eth_handle) < 0)
-  {
-    ptperr("failed to get socket eth_handle %d\n", errno);
+  if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &state->eth_handle) < 0) {
+    ptperr("failed to get eth_handle: %d\n", errno);
     return ERROR;
   }
   ptpinfo("L2TAP eth handle: %p", (void *)state->eth_handle);
-  // esp_eth_clock_cfg_t clk_cfg = {
-  //   .eth_hndl  = state->eth_handle,
-  //   .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
-  // };
-
-  // Note: clock_init will enable PTP HW timestamping in DM9058 driver, so it should be called before enabling time stamping in L2TAP to ensure timestamps are generated for received frames and can be retrieved in L2TAP.
-  // ptpinfo("esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
-  // esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
-
-  // Enable time stamping in L2TAP
-  if(ioctl(state->ptp_socket, L2TAP_S_TIMESTAMP_EN) < 0)
-  {
-    ptperr("failed to enable time stamping in l2 socket: %d\n", errno);
+  if (ioctl(state->ptp_socket, L2TAP_S_TIMESTAMP_EN) < 0) {
+    ptperr("failed to enable L2TAP timestamping: %d\n", errno);
     return ERROR;
   }
-
-  // get HW address
   esp_eth_ioctl(state->eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
-
-  // Add well-known PTP multicast destination MAC addresses to the filter
   uint8_t dest_addr[ETH_ADDR_LEN];
   SET_MAC_ADDR(dest_addr, 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00);
   esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
   SET_MAC_ADDR(dest_addr, 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E);
   esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
 
-  state->remote_time_ns_prev = 0;
-  state->local_time_ns_prev = 0;
+#else /* !CONFIG_ESP_NETIF_L2_TAP — UDP/IPv4 */
+/* ── UDP/IPv4 ─────────────────────────────────────────────────────────────── */
+  {
+  struct sockaddr_in bind_addr;
+  struct ip_mreq mreq;
+  int opt;
 
-  state->offset_pi.kp = 5;   // Dead-beat (kp=1) causes 2-cycle limit cycle; kp=5 → ~20% correction/step → exponential convergence
-  state->offset_pi.ki = 50;  // Slow integrator accumulation lets drift_acc converge to true frequency error (~490 ppm) without windup
+  /* Obtain the eth_handle stored by esp_eth_clock_init() */
+  state->eth_handle = esp_eth_clock_get_handle();
+  if (!state->eth_handle) {
+    ptperr("No eth handle — call esp_eth_clock_init() before ptpd_start()\n");
+    return ERROR;
+  }
+  ptpinfo("UDP/IPv4 mode: eth_handle=%p", (void *)state->eth_handle);
+
+  /* Enable automatic TX packet parsing so the driver captures HW timestamps */
+  bool auto_proc = true;
+  esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS, &auto_proc);
+
+  /* Get MAC address for building the PTP clock identity */
+  esp_eth_ioctl(state->eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
+
+  /* --- Create event socket (port 319) --- */
+  state->event_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (state->event_socket < 0) {
+    ptperr("Failed to create event socket: %d\n", errno);
+    return ERROR;
+  }
+
+  /* --- Create info socket (port 320) --- */
+  state->info_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (state->info_socket < 0) {
+    ptperr("Failed to create info socket: %d\n", errno);
+    close(state->event_socket);
+    state->event_socket = -1;
+    return ERROR;
+  }
+
+  opt = 1;
+  setsockopt(state->event_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  setsockopt(state->info_socket,  SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+  /* Bind event socket to 0.0.0.0:319 */
+  memset(&bind_addr, 0, sizeof(bind_addr));
+  bind_addr.sin_family      = AF_INET;
+  bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  bind_addr.sin_port        = htons(PTP_UDP_PORT_EVENT);
+  if (bind(state->event_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+    ptperr("Failed to bind event socket to port %d: %d\n", PTP_UDP_PORT_EVENT, errno);
+    return ERROR;
+  }
+
+  /* Bind info socket to 0.0.0.0:320 */
+  bind_addr.sin_port = htons(PTP_UDP_PORT_INFO);
+  if (bind(state->info_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+    ptperr("Failed to bind info socket to port %d: %d\n", PTP_UDP_PORT_INFO, errno);
+    return ERROR;
+  }
+
+  /* Join PTP primary multicast group 224.0.1.129 on both sockets */
+  memset(&mreq, 0, sizeof(mreq));
+  mreq.imr_multiaddr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  if (setsockopt(state->event_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+    ptperr("Failed to join PTP multicast on event socket: %d\n", errno);
+    return ERROR;
+  }
+  if (setsockopt(state->info_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+    ptperr("Failed to join PTP multicast on info socket: %d\n", errno);
+    return ERROR;
+  }
+
+  /* Limit multicast TTL to 1 (link-local) */
+  uint8_t ttl = 1;
+  setsockopt(state->event_socket, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+  setsockopt(state->info_socket,  IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+
+  /* Disable multicast loopback (we don't want to receive our own packets) */
+  uint8_t loop = 0;
+  setsockopt(state->event_socket, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+  setsockopt(state->info_socket,  IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+  } /* end UDP socket setup block */
+#endif /* CONFIG_ESP_NETIF_L2_TAP */
+
+  /* ── Shared: PI controller and PTP clock identity (both transports) ─────── */
+  state->remote_time_ns_prev = 0;
+  state->local_time_ns_prev  = 0;
+
+  state->offset_pi.kp        = 5;
+  state->offset_pi.ki        = 50;
   state->offset_pi.drift_acc = 0;
 
-  state->own_identity.header.version = 2;
-  state->own_identity.header.domain = CONFIG_NETUTILS_PTPD_DOMAIN;
+  state->own_identity.header.version           = 2;
+  state->own_identity.header.domain            = CONFIG_NETUTILS_PTPD_DOMAIN;
   state->own_identity.header.sourceidentity[0] = state->intf_hw_addr[0];
   state->own_identity.header.sourceidentity[1] = state->intf_hw_addr[1];
   state->own_identity.header.sourceidentity[2] = state->intf_hw_addr[2];
@@ -744,18 +852,18 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->own_identity.header.sourceportindex[0] = 0;
   state->own_identity.header.sourceportindex[1] = 1;
 #ifdef CONFIG_NETUTILS_PTPD_SERVER
-  state->own_identity.gm_priority1 = CONFIG_NETUTILS_PTPD_PRIORITY1;
-  state->own_identity.gm_quality[0] = CONFIG_NETUTILS_PTPD_CLASS;
-  state->own_identity.gm_quality[1] = CONFIG_NETUTILS_PTPD_ACCURACY;
-  state->own_identity.gm_quality[2] = 0xff; /* No variance estimate */
-  state->own_identity.gm_quality[3] = 0xff;
-  state->own_identity.gm_priority2 = CONFIG_NETUTILS_PTPD_PRIORITY2;
+  state->own_identity.gm_priority1    = CONFIG_NETUTILS_PTPD_PRIORITY1;
+  state->own_identity.gm_quality[0]   = CONFIG_NETUTILS_PTPD_CLASS;
+  state->own_identity.gm_quality[1]   = CONFIG_NETUTILS_PTPD_ACCURACY;
+  state->own_identity.gm_quality[2]   = 0xff;
+  state->own_identity.gm_quality[3]   = 0xff;
+  state->own_identity.gm_priority2    = CONFIG_NETUTILS_PTPD_PRIORITY2;
   memcpy(state->own_identity.gm_identity,
          state->own_identity.header.sourceidentity,
          sizeof(state->own_identity.gm_identity));
   state->own_identity.timesource = CONFIG_NETUTILS_PTPD_CLOCKSOURCE;
 #else
-  state->own_identity.gm_priority1 = 255; // When daemon is statically configured as slave, set the worst
+  state->own_identity.gm_priority1 = 255;
 #endif
 
   s_state = state;
@@ -918,24 +1026,34 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
 static int ptp_destroy_state(FAR struct ptp_state_s *state)
 {
 #ifdef ESP_PTP
-  // Remove well-known PTP multicast destination MAC addresses from the filter
-  esp_eth_handle_t eth_handle;
-  if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0)
-  {
-    ptperr("failed to get socket eth_handle %d\n", errno);
-    return ERROR;
-  }
+#ifdef CONFIG_ESP_NETIF_L2_TAP
+  /* L2TAP: remove MAC filters then close the single raw socket */
   uint8_t dest_addr[ETH_ADDR_LEN];
   SET_MAC_ADDR(dest_addr, 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00);
-  esp_eth_ioctl(eth_handle, ETH_CMD_DEL_MAC_FILTER, dest_addr);
+  esp_eth_ioctl(state->eth_handle, ETH_CMD_DEL_MAC_FILTER, dest_addr);
   SET_MAC_ADDR(dest_addr, 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E);
-  esp_eth_ioctl(eth_handle, ETH_CMD_DEL_MAC_FILTER, dest_addr);
-
-  if (state->ptp_socket > 0)
-  {
+  esp_eth_ioctl(state->eth_handle, ETH_CMD_DEL_MAC_FILTER, dest_addr);
+  if (state->ptp_socket >= 0) {
     close(state->ptp_socket);
     state->ptp_socket = -1;
   }
+#else /* !CONFIG_ESP_NETIF_L2_TAP — UDP/IPv4 */
+  /* UDP: leave multicast group and close both sockets */
+  struct ip_mreq mreq;
+  memset(&mreq, 0, sizeof(mreq));
+  mreq.imr_multiaddr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  if (state->event_socket >= 0) {
+    setsockopt(state->event_socket, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+    close(state->event_socket);
+    state->event_socket = -1;
+  }
+  if (state->info_socket >= 0) {
+    setsockopt(state->info_socket, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+    close(state->info_socket);
+    state->info_socket = -1;
+  }
+#endif /* CONFIG_ESP_NETIF_L2_TAP */
 #else
   struct in_addr mcast_addr;
 
@@ -1998,7 +2116,11 @@ static int ptp_daemon(int argc, FAR char** argv)
   FAR const char *interface = "eth0";
   FAR struct ptp_state_s *state;
 #ifdef ESP_PTP
-  struct pollfd pollfds[1]; // everything is received over one socket at L2
+#ifdef CONFIG_ESP_NETIF_L2_TAP
+  struct pollfd pollfds[1]; /* single L2TAP raw socket */
+#else
+  struct pollfd pollfds[2]; /* [0]=event(319), [1]=info(320) */
+#endif
 #else
   struct pollfd pollfds[2];
   struct msghdr rxhdr;
@@ -2042,14 +2164,19 @@ static int ptp_daemon(int argc, FAR char** argv)
   ptp_setup_sighandlers(state);
 #endif // !ESP_PTP
 
+#ifdef CONFIG_ESP_NETIF_L2_TAP
   pollfds[0].events = POLLIN;
-#ifdef ESP_PTP
-  pollfds[0].fd = state->ptp_socket;
+  pollfds[0].fd     = state->ptp_socket;
 #else
-  pollfds[0].fd = state->event_socket;
+  pollfds[0].events = POLLIN;
+  pollfds[0].fd     = state->event_socket;
   pollfds[1].events = POLLIN;
+  pollfds[1].fd     = state->info_socket;
+#endif /* CONFIG_ESP_NETIF_L2_TAP */
+#ifndef ESP_PTP
+  pollfds[0].fd = state->event_socket;
   pollfds[1].fd = state->info_socket;
-#endif // ESP_PTP
+#endif
 
   while (!state->stop)
     {
@@ -2068,76 +2195,49 @@ static int ptp_daemon(int argc, FAR char** argv)
 #endif // !ESP_PTP
 
       pollfds[0].revents = 0;
-#ifndef ESP_PTP
+#if !defined(ESP_PTP) || !defined(CONFIG_ESP_NETIF_L2_TAP)
       pollfds[1].revents = 0;
-      ret = poll(pollfds, 2, PTPD_POLL_INTERVAL);
+#endif
+
+#if defined(ESP_PTP) && defined(CONFIG_ESP_NETIF_L2_TAP)
+      ret = poll(pollfds, 1, PTPD_POLL_INTERVAL);
 #else
-	  ret = poll(pollfds, 1, PTPD_POLL_INTERVAL);
-#endif // !ESP_PTP
+      ret = poll(pollfds, 2, PTPD_POLL_INTERVAL);
+#endif
 
-      if (pollfds[0].revents)
+      if (pollfds[0].revents & POLLIN)
         {
-          /* Receive time-critical packet, potentially with cmsg
-           * indicating the timestamp.
-           */
-
-#ifdef ESP_PTP
+#if defined(ESP_PTP) && defined(CONFIG_ESP_NETIF_L2_TAP)
+          /* L2TAP: receive raw PTP frame from single socket */
           ret = ptp_net_recv(state, &state->rxbuf, sizeof(state->rxbuf), &state->rxtime);
+#elif defined(ESP_PTP)
+          /* UDP/IPv4: receive event packet (port 319) with HW timestamp */
+          ret = ptp_net_recv(state, state->event_socket, true,
+                             &state->rxbuf, sizeof(state->rxbuf), &state->rxtime);
 #else
           ret = recvmsg(state->event_socket, &rxhdr, MSG_DONTWAIT);
-#endif // ESP_PTP
-
-          if (ret > 0)
-            {
-#ifndef ESP_PTP
-              ptp_getrxtime(state, &rxhdr, &state->rxtime);
+          if (ret > 0) { ptp_getrxtime(state, &rxhdr, &state->rxtime); }
 #endif
-#ifdef ESP_PTP
-              {
-                //esp32_DM9058_custom_ioctl()
-		            //to get 'emac->last_rx_timestamp'
-
-                // if( esp_eth_clock_get_rx_time(state->eth_handle, &state->rxtime) == ESP_OK) {
-                //   ptpdbg("RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                // } else {
-                //   ptpdbg("get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
-                // }
-
-                #if 0
-                eth_mac_time_t rx_ts = {0};
-                if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK)
-                {
-                  state->rxtime.tv_sec  = (time_t)rx_ts.seconds;
-                  state->rxtime.tv_nsec = (long)rx_ts.nanoseconds;
-                  ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                } else
-                {
-                  ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping L2TAP timestamp");
-                }
-                #endif // 0
-            }
-#endif // ESP_PTP
-              ptp_process_rx_packet(state, ret);
-            }
+          if (ret > 0) { ptp_process_rx_packet(state, ret); }
         }
+
+#if !defined(ESP_PTP) || !defined(CONFIG_ESP_NETIF_L2_TAP)
+      if (pollfds[1].revents & POLLIN)
+        {
+#ifdef ESP_PTP
+          /* UDP/IPv4: receive general packet (port 320) — no timestamp needed */
+          ret = ptp_net_recv(state, state->info_socket, false,
+                             &state->rxbuf, sizeof(state->rxbuf), &state->rxtime);
+#else
+          ret = recv(state->info_socket, &state->rxbuf, sizeof(state->rxbuf), MSG_DONTWAIT);
+#endif
+          if (ret > 0) { ptp_process_rx_packet(state, ret); }
+        }
+#endif /* !ESP_PTP || !CONFIG_ESP_NETIF_L2_TAP */
 
 #ifndef ESP_PTP
-      if (pollfds[1].revents)
-        {
-          /* Receive non-time-critical packet. */
-
-          ret = recv(state->info_socket, &state->rxbuf, sizeof(state->rxbuf),
-                    MSG_DONTWAIT);
-          if (ret > 0)
-            {
-              ptp_process_rx_packet(state, ret);
-            }
-        }
-
       if (pollfds[0].revents == 0 && pollfds[1].revents == 0)
         {
-          /* No packets received, check for multicast timeout */
-
           ptp_check_multicast_status(state);
         }
 #endif // !ESP_PTP

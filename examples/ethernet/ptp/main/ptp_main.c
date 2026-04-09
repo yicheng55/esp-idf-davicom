@@ -10,12 +10,13 @@
 #include "esp_eth.h"
 #include "esp_netif.h"
 #include "ethernet_init.h"
-#include "esp_vfs_l2tap.h"
 #include "driver/gpio.h"
 #include "freertos/event_groups.h"
 #include "ptpd.h"
-
 #include "esp_eth_time.h"
+#ifdef CONFIG_ESP_NETIF_L2_TAP
+#include "esp_vfs_l2tap.h"
+#endif
 
 static const char *TAG = "ptp_example";
 
@@ -81,10 +82,12 @@ void init_ethernet_and_netif(void)
     ESP_LOGI(TAG, "[3] ret=%d (%s)", ret, esp_err_to_name(ret));
     ESP_ERROR_CHECK(ret);
 
+#ifdef CONFIG_ESP_NETIF_L2_TAP
     ESP_LOGI(TAG, "[4] esp_vfs_l2tap_intf_register");
     ret = esp_vfs_l2tap_intf_register(NULL);
     ESP_LOGI(TAG, "[4] ret=%d (%s)", ret, esp_err_to_name(ret));
     ESP_ERROR_CHECK(ret);
+#endif
 
     esp_netif_inherent_config_t esp_netif_base_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
     esp_netif_config_t esp_netif_config = {
@@ -158,7 +161,11 @@ void app_main(void)
 
     esp_eth_clock_cfg_t clock_cfg = {
         .eth_hndl  = s_eth_handles[0],
+#ifdef CONFIG_ESP_NETIF_L2_TAP
         .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
+#else
+        .transport = ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4,
+#endif
     };
     esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clock_cfg);
 
