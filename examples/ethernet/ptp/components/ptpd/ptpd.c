@@ -698,10 +698,10 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     return ERROR;
   }
   ptpinfo("L2TAP eth handle: %p", (void *)state->eth_handle);
-  esp_eth_clock_cfg_t clk_cfg = {
-    .eth_hndl  = state->eth_handle,
-    .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
-  };
+  // esp_eth_clock_cfg_t clk_cfg = {
+  //   .eth_hndl  = state->eth_handle,
+  //   .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
+  // };
 
   // Note: clock_init will enable PTP HW timestamping in DM9058 driver, so it should be called before enabling time stamping in L2TAP to ensure timestamps are generated for received frames and can be retrieved in L2TAP.
   // ptpinfo("esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
