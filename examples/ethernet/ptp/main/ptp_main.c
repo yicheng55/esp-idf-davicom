@@ -20,6 +20,7 @@
 static const char *TAG = "ptp_example";
 
 #define ETH_CONNECTED_BIT BIT0
+#define ETH_IPV4_READY_TIMEOUT_MS 10000
 
 static EventGroupHandle_t s_eth_event_group;
 
@@ -43,6 +44,33 @@ static void configure_static_ip(esp_netif_t *eth_netif)
              CONFIG_EXAMPLE_ETH_STATIC_NETMASK_ADDR);
     ESP_ERROR_CHECK(esp_netif_dhcpc_stop(eth_netif));
     ESP_ERROR_CHECK(esp_netif_set_ip_info(eth_netif, &ip_info));
+}
+
+static esp_err_t wait_for_ipv4_address(const char *if_key, TickType_t timeout_ticks)
+{
+    esp_netif_t *eth_netif = esp_netif_get_handle_from_ifkey(if_key);
+    if (eth_netif == NULL) {
+        ESP_LOGE(TAG, "Failed to find netif for %s", if_key);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    TickType_t start_tick = xTaskGetTickCount();
+    while ((xTaskGetTickCount() - start_tick) < timeout_ticks) {
+        esp_netif_ip_info_t ip_info = {0};
+        esp_err_t ret = esp_netif_get_ip_info(eth_netif, &ip_info);
+        if (ret == ESP_OK && ip_info.ip.addr != 0) {
+            ESP_LOGI(TAG, "%s IPv4 ready: " IPSTR ", gateway: " IPSTR ", netmask: " IPSTR,
+                     if_key,
+                     IP2STR(&ip_info.ip),
+                     IP2STR(&ip_info.gw),
+                     IP2STR(&ip_info.netmask));
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    ESP_LOGW(TAG, "Timed out waiting for IPv4 address on %s", if_key);
+    return ESP_ERR_TIMEOUT;
 }
 #endif
 
@@ -129,7 +157,7 @@ void init_ethernet_and_netif(void)
 
 #if CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
         if (i == 0) {
-            configure_static_ip(eth_netif);
+            // configure_static_ip(eth_netif);
         }
 #endif
     }
@@ -179,6 +207,13 @@ void app_main(void)
         ESP_LOGE(TAG, "Ethernet not initialized or not connected, aborting");
         return;
     }
+
+#if CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+    if (wait_for_ipv4_address("ETH_0", pdMS_TO_TICKS(ETH_IPV4_READY_TIMEOUT_MS)) != ESP_OK) {
+        ESP_LOGE(TAG, "ETH_0 has no IPv4 address, aborting PTP over UDP/IPv4 startup");
+        return;
+    }
+#endif
 
     esp_eth_clock_cfg_t clock_cfg = {
         .eth_hndl  = s_eth_handles[0],
