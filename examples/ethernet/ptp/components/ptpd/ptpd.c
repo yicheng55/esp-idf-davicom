@@ -77,6 +77,7 @@
 #include "semaphore.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_netif.h"
 #include "lwip/prot/ethernet.h" // Ethernet headers
 
 #include "esp_eth_time.h"
@@ -172,6 +173,7 @@ struct ptp_state_s
 
 #ifdef ESP_PTP
   uint8_t intf_hw_addr[ETH_ADDR_LEN];
+  struct in_addr intf_ip4_addr;
   int ptp_socket;
   esp_eth_handle_t eth_handle;
 
@@ -335,6 +337,21 @@ static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, 
 }
 
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+static uint16_t ptp_ipv4_header_checksum(const uint8_t *header, size_t header_len)
+{
+  uint32_t sum = 0;
+
+  for (size_t offset = 0; offset < header_len; offset += 2) {
+    sum += ((uint32_t)header[offset] << 8) | header[offset + 1];
+  }
+
+  while (sum >> 16) {
+    sum = (sum & 0xFFFFU) + (sum >> 16);
+  }
+
+  return (uint16_t)(~sum);
+}
+
 static void ptp_create_udp_ipv4_frame(struct ptp_state_s *state, uint8_t *frame,
                                        void *ptp_msg, uint16_t ptp_msg_len,
                                        uint16_t udp_dst_port)
@@ -358,9 +375,12 @@ static void ptp_create_udp_ipv4_frame(struct ptp_state_s *state, uint8_t *frame,
   ip[6]  = 0x00; ip[7] = 0x00;        // flags, fragment offset
   ip[8]  = 1;                           // TTL=1 (multicast)
   ip[9]  = IP_PROTO_UDP;
-  ip[10] = 0; ip[11] = 0;              // checksum (0 = disabled)
-  memset(ip + 12, 0, 4);               // src IP = 0.0.0.0
+  ip[10] = 0; ip[11] = 0;              // checksum filled after header construction
+  memcpy(ip + 12, &state->intf_ip4_addr.s_addr, 4);
   ip[16] = 224; ip[17] = 0; ip[18] = 1; ip[19] = 129; // dst = 224.0.1.129
+  uint16_t ip_checksum = ptp_ipv4_header_checksum(ip, IP_HDR_LEN);
+  ip[10] = (ip_checksum >> 8) & 0xFF;
+  ip[11] = ip_checksum & 0xFF;
 
   // UDP header (8 bytes)
   uint8_t *udp = ip + IP_HDR_LEN;
@@ -803,6 +823,25 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
 
   // get HW address
   esp_eth_ioctl(state->eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
+
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+  esp_netif_t *netif = esp_netif_get_handle_from_ifkey(interface);
+  esp_netif_ip_info_t ip_info;
+
+  if (netif == NULL)
+  {
+    ptperr("Failed to find esp_netif for interface %s\n", interface);
+    return ERROR;
+  }
+
+  if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK)
+  {
+    ptperr("Failed to get IP address information for interface %s\n", interface);
+    return ERROR;
+  }
+
+  state->intf_ip4_addr.s_addr = ip_info.ip.addr;
+#endif
 
   // Add multicast destination MAC addresses to the filter
   uint8_t dest_addr[ETH_ADDR_LEN];
