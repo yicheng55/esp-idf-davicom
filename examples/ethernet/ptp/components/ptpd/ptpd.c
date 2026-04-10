@@ -841,6 +841,12 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   }
 
   state->intf_ip4_addr.s_addr = ip_info.ip.addr;
+  ptpinfo("Interface %s, MAC: %02x:%02x:%02x:%02x:%02x:%02x, IPv4: %d.%d.%d.%d\n",
+          interface,
+          state->intf_hw_addr[0], state->intf_hw_addr[1], state->intf_hw_addr[2],
+          state->intf_hw_addr[3], state->intf_hw_addr[4], state->intf_hw_addr[5],
+          (ip_info.ip.addr >> 0) & 0xFF, (ip_info.ip.addr >> 8) & 0xFF,
+          (ip_info.ip.addr >> 16) & 0xFF, (ip_info.ip.addr >> 24) & 0xFF);
 #endif
 
   // Add multicast destination MAC addresses to the filter

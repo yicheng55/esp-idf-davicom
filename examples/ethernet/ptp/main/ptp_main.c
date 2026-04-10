@@ -28,6 +28,24 @@ static bool s_gpio_level;
 static esp_eth_handle_t *s_eth_handles;
 static uint8_t s_eth_port_cnt;
 
+#if CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+static void configure_static_ip(esp_netif_t *eth_netif)
+{
+    esp_netif_ip_info_t ip_info = {0};
+
+    ESP_ERROR_CHECK(esp_netif_str_to_ip4(CONFIG_EXAMPLE_ETH_STATIC_IP_ADDR, &ip_info.ip));
+    ESP_ERROR_CHECK(esp_netif_str_to_ip4(CONFIG_EXAMPLE_ETH_STATIC_GW_ADDR, &ip_info.gw));
+    ESP_ERROR_CHECK(esp_netif_str_to_ip4(CONFIG_EXAMPLE_ETH_STATIC_NETMASK_ADDR, &ip_info.netmask));
+
+    ESP_LOGI(TAG, "Configuring ETH_0 with static IPv4 %s, gateway %s, netmask %s",
+             CONFIG_EXAMPLE_ETH_STATIC_IP_ADDR,
+             CONFIG_EXAMPLE_ETH_STATIC_GW_ADDR,
+             CONFIG_EXAMPLE_ETH_STATIC_NETMASK_ADDR);
+    ESP_ERROR_CHECK(esp_netif_dhcpc_stop(eth_netif));
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(eth_netif, &ip_info));
+}
+#endif
+
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
 {
@@ -108,6 +126,12 @@ void init_ethernet_and_netif(void)
         ret = esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handles[i]));
         ESP_LOGI(TAG, "[5.%d] ret=%d (%s)", i, ret, esp_err_to_name(ret));
         ESP_ERROR_CHECK(ret);
+
+#if CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+        if (i == 0) {
+            configure_static_ip(eth_netif);
+        }
+#endif
     }
 
     for (int i = 0; i < eth_port_cnt; i++) {

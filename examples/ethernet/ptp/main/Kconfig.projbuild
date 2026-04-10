@@ -17,6 +17,28 @@ menu "Example Configuration"
             bool "UDP IPv4"
     endchoice
 
+    if EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+
+    config EXAMPLE_ETH_STATIC_IP_ADDR
+        string "Ethernet static IPv4 address"
+        default "192.168.249.50"
+        help
+            Static IPv4 address assigned to ETH_0 for the PTP UDP/IPv4 example.
+
+    config EXAMPLE_ETH_STATIC_GW_ADDR
+        string "Ethernet IPv4 gateway"
+        default "192.168.249.1"
+        help
+            Default gateway assigned to ETH_0 for the PTP UDP/IPv4 example.
+
+    config EXAMPLE_ETH_STATIC_NETMASK_ADDR
+        string "Ethernet IPv4 netmask"
+        default "255.255.255.0"
+        help
+            IPv4 netmask assigned to ETH_0 for the PTP UDP/IPv4 example.
+
+    endif
+
     config EXAMPLE_PTP_PULSE_GPIO
         int "PPS GPIO number"
         range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
