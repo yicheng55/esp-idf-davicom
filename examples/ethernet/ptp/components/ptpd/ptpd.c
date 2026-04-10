@@ -93,6 +93,11 @@
 #define IP_HDR_LEN           20
 #define UDP_HDR_LEN          8
 #define UDP_IPV4_EXTRA_HDR   (IP_HDR_LEN + UDP_HDR_LEN)
+#ifdef SO_TIMESTAMP
+#define PTP_UDP_RX_SW_TIMESTAMP 1
+#else
+#define PTP_UDP_RX_SW_TIMESTAMP 0
+#endif
 #else
 #define PTP_ETH_FILTER_TYPE  ETH_TYPE_PTP
 #endif
@@ -477,7 +482,7 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
   /* UDP/IPv4 mode: use recvmsg() on event_socket (port 319).
    * lwIP delivers only PTP event packets here; no manual ETH/IP/UDP parsing needed.
-   * SO_TIMESTAMP cmsg provides kernel RX timestamp (software, not hardware). */
+  * If SO_TIMESTAMP is unavailable in the current lwIP build, fall back to CLOCK_REALTIME. */
   struct iovec iov;
   struct msghdr rxhdr;
 
@@ -487,13 +492,16 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   memset(&rxhdr, 0, sizeof(rxhdr));
   rxhdr.msg_iov        = &iov;
   rxhdr.msg_iovlen     = 1;
+#if PTP_UDP_RX_SW_TIMESTAMP
   rxhdr.msg_control    = state->rxcmsg;
   rxhdr.msg_controllen = sizeof(state->rxcmsg);
+#endif
 
   int ret = recvmsg(state->event_socket, &rxhdr, MSG_DONTWAIT);
 
   if (ret > 0 && ts) {
-    /* Try to extract SO_TIMESTAMP from cmsg (timeval → timespec) */
+#if PTP_UDP_RX_SW_TIMESTAMP
+    /* Try to extract SO_TIMESTAMP from cmsg (timeval -> timespec). */
     bool got_ts = false;
     for (struct cmsghdr *c = CMSG_FIRSTHDR(&rxhdr); c != NULL; c = CMSG_NXTHDR(&rxhdr, c)) {
       if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_TIMESTAMP
@@ -508,6 +516,9 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
     if (!got_ts) {
       clock_gettime(CLOCK_REALTIME, ts);
     }
+#else
+    clock_gettime(CLOCK_REALTIME, ts);
+#endif
   }
 
   return ret;
@@ -906,9 +917,13 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     ptperr("Failed to join PTP multicast on event socket: %d\n", errno);
     return ERROR;
   }
-  // Enable SO_TIMESTAMP for kernel-level RX timestamps (software fallback)
+#if PTP_UDP_RX_SW_TIMESTAMP
+  // Enable SO_TIMESTAMP for kernel-level RX timestamps when available.
   int ts_en = 1;
   setsockopt(state->event_socket, SOL_SOCKET, SO_TIMESTAMP, &ts_en, sizeof(ts_en));
+#else
+  ptpinfo("SO_TIMESTAMP unavailable in this lwIP build; using CLOCK_REALTIME fallback for UDP RX timestamps");
+#endif
 
   // ── info_socket: RX on port 320 (general/announce PTP messages) ──
   state->info_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
