@@ -352,6 +352,44 @@ static uint16_t ptp_ipv4_header_checksum(const uint8_t *header, size_t header_le
   return (uint16_t)(~sum);
 }
 
+// RFC 768: UDP checksum over pseudo-header + UDP header + payload.
+// Pseudo-header = src_ip(4) | dst_ip(4) | 0x00 | proto(1) | udp_len(2)
+// If the computed result is 0x0000, transmit 0xFFFF (per RFC 768).
+static uint16_t ptp_udp_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
+                                  const uint8_t *udp, uint16_t udp_len)
+{
+  uint32_t sum = 0;
+
+  // Pseudo-header: source IP
+  sum += ((uint32_t)src_ip[0] << 8) | src_ip[1];
+  sum += ((uint32_t)src_ip[2] << 8) | src_ip[3];
+
+  // Pseudo-header: destination IP
+  sum += ((uint32_t)dst_ip[0] << 8) | dst_ip[1];
+  sum += ((uint32_t)dst_ip[2] << 8) | dst_ip[3];
+
+  // Pseudo-header: zero(8) + protocol(8) + UDP length(16)
+  sum += (uint32_t)IP_PROTO_UDP;
+  sum += (uint32_t)udp_len;
+
+  // UDP header + payload (16-bit words)
+  for (uint16_t i = 0; i + 1 < udp_len; i += 2) {
+    sum += ((uint32_t)udp[i] << 8) | udp[i + 1];
+  }
+  // Odd trailing byte: pad with zero on the right
+  if (udp_len & 1) {
+    sum += (uint32_t)udp[udp_len - 1] << 8;
+  }
+
+  // Fold 32-bit accumulator into 16 bits
+  while (sum >> 16) {
+    sum = (sum & 0xFFFFU) + (sum >> 16);
+  }
+
+  uint16_t result = (uint16_t)(~sum);
+  return (result != 0) ? result : 0xFFFF;
+}
+
 static void ptp_create_udp_ipv4_frame(struct ptp_state_s *state, uint8_t *frame,
                                        void *ptp_msg, uint16_t ptp_msg_len,
                                        uint16_t udp_dst_port)
@@ -390,10 +428,15 @@ static void ptp_create_udp_ipv4_frame(struct ptp_state_s *state, uint8_t *frame,
   udp[3] = udp_dst_port & 0xFF;
   udp[4] = (udp_len >> 8) & 0xFF;
   udp[5] = udp_len & 0xFF;
-  udp[6] = 0; udp[7] = 0;             // checksum disabled
+  udp[6] = 0; udp[7] = 0;             // checksum field = 0 before calculation
 
-  // PTP payload
+  // PTP payload — must be in place before checksum is computed
   memcpy(udp + UDP_HDR_LEN, ptp_msg, ptp_msg_len);
+
+  // UDP checksum (RFC 768 pseudo-header over src/dst IP + UDP header + payload)
+  uint16_t udp_checksum = ptp_udp_checksum(ip + 12, ip + 16, udp, udp_len);
+  udp[6] = (udp_checksum >> 8) & 0xFF;
+  udp[7] = udp_checksum & 0xFF;
 }
 #endif // CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
 
@@ -1242,7 +1285,11 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
 
   ptp_increment_sequence(&state->sync_seq, &msg.header);
   ptp_gettime(state, &ts);
+#ifdef CONFIG_NETUTILS_PTPD_TWOSTEP_SYNC
   timespec_to_ptp_format(&ts, msg.origintimestamp);
+#else
+  memset(msg.origintimestamp, 0, sizeof(msg.origintimestamp));
+#endif
 
 #ifdef ESP_PTP
   ret = ptp_net_send(state, &msg, sizeof(msg), &ts);
