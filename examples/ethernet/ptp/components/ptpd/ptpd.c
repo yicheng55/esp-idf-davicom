@@ -789,6 +789,36 @@ static int ptp_gettime(FAR struct ptp_state_s *state,
 #endif // ESP_PTP
 }
 
+#ifdef ESP_PTP
+static int ptp_get_delay_resp_timestamp(FAR struct ptp_state_s *state,
+                                        FAR struct timespec *ts)
+{
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+  esp_err_t ret = esp_eth_clock_get_rx_time(state->eth_handle, ts);
+  if (ret == ESP_OK)
+    {
+      ptpdbg("Using hardware RX timestamp for Delay_Resp: %lld.%09ld",
+             (long long)ts->tv_sec, (long)ts->tv_nsec);
+      return OK;
+    }
+
+  if (ptp_gettime(state, ts) == OK)
+    {
+      ptpwarn("Falling back to CLOCK_PTP_SYSTEM for Delay_Resp timestamp: %s",
+              esp_err_to_name(ret));
+      return OK;
+    }
+
+  ptperr("Failed to get Delay_Resp timestamp: rx_ts=%s errno=%d",
+         esp_err_to_name(ret), errno);
+  return ERROR;
+#else
+  *ts = state->rxtime;
+  return OK;
+#endif
+}
+#endif // ESP_PTP
+
 /* Change current system timestamp by jumping */
 
 static int ptp_settime(FAR struct ptp_state_s *state,
@@ -2013,6 +2043,7 @@ static int ptp_process_delay_req(FAR struct ptp_state_s *state,
                                  FAR struct ptp_delay_req_s *msg)
 {
   struct ptp_delay_resp_s resp;
+  struct timespec delay_req_rxtime;
 #ifndef ESP_PTP
   struct sockaddr_in addr;
 #endif // !ESP_PTP
@@ -2035,7 +2066,16 @@ static int ptp_process_delay_req(FAR struct ptp_state_s *state,
   resp.header = state->own_identity.header;
   resp.header.messagetype = PTP_MSGTYPE_DELAY_RESP;
   resp.header.messagelength[1] = sizeof(resp);
-  timespec_to_ptp_format(&state->rxtime, resp.receivetimestamp);
+#ifdef ESP_PTP
+  ret = ptp_get_delay_resp_timestamp(state, &delay_req_rxtime);
+  if (ret != OK)
+    {
+      return ret;
+    }
+#else
+  delay_req_rxtime = state->rxtime;
+#endif
+  timespec_to_ptp_format(&delay_req_rxtime, resp.receivetimestamp);
   memcpy(resp.reqidentity, msg->header.sourceidentity,
          sizeof(resp.reqidentity));
   memcpy(resp.reqportindex, msg->header.sourceportindex,
