@@ -97,6 +97,8 @@ typedef struct {
     esp_eth_ptp_dm9058_t ptp;
     bool ptp_auto_process;
     bool ptp_two_step_mode;
+    eth_mac_time_t last_ptp_rx_ts;      /*!< Last received PTP hardware RX timestamp (any message type) */
+    bool last_ptp_rx_ts_valid;          /*!< True when last_ptp_rx_ts holds a valid timestamp */
 } esp32_DM9058_t;
 
 typedef struct {
@@ -880,8 +882,13 @@ static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *da
         time->nanoseconds = ptp_time.nanoseconds;
         return ESP_OK;
     case ETH_MAC_DM9058_CMD_G_PTP_RX_TIME:
-        /* RX timestamp is now delivered inline via stack_input_info; polling via ioctl is no longer supported. */
-        return ESP_ERR_NOT_SUPPORTED;
+        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_RX_TIME expects eth_mac_time_t*");
+        if (!emac->last_ptp_rx_ts_valid) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        time->seconds = emac->last_ptp_rx_ts.seconds;
+        time->nanoseconds = emac->last_ptp_rx_ts.nanoseconds;
+        return ESP_OK;
     case ETH_MAC_DM9058_CMD_S_TARGET_TIME:
         // Target time not yet supported in DM9058
         ESP_LOGW(TAG, "Target time feature not yet implemented for DM9058");
@@ -1399,19 +1406,19 @@ static void esp32_DM9058_task(void *arg)
                             memcpy(buffer, emac->rx_buffer, buf_len);
                             ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
                             /* Pass timestamp metadata only when available; otherwise keep info NULL. */
-                            if (rx_ts_valid &&
-                                pkt_info_ret == ESP_OK &&
-                                info.is_ptp &&
-                                (info.message_type == ESP_ETH_PTP_DM9058_MSG_SYNC ||
-                                 info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ)) {
-                                rx_info = &rx_ts;
-                                ESP_LOGD(TAG, "forward rx ts to stack: %lu.%09lu", rx_ts.seconds, rx_ts.nanoseconds);
-                            } else if (rx_ts_valid &&
-                                       pkt_info_ret == ESP_OK &&
-                                       info.is_ptp &&
-                                       info.message_type != ESP_ETH_PTP_DM9058_MSG_SYNC &&
-                                       info.message_type != ESP_ETH_PTP_DM9058_MSG_DELAY_REQ) {
-                                ESP_LOGD(TAG, "timestamp filtered out (non sync/delay_req), msg_type=0x%02x", info.message_type);
+                            if (rx_ts_valid && pkt_info_ret == ESP_OK && info.is_ptp) {
+                                /* Store ALL PTP RX timestamps for ioctl retrieval (UDP/IPv4 mode) */
+                                emac->last_ptp_rx_ts = rx_ts;
+                                emac->last_ptp_rx_ts_valid = true;
+                                /* Forward via stack_input_info only for SYNC and DELAY_REQ (L2TAP / L2 mode) */
+                                if (info.message_type == ESP_ETH_PTP_DM9058_MSG_SYNC ||
+                                    info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ) {
+                                    rx_info = &rx_ts;
+                                    ESP_LOGD(TAG, "forward rx ts to stack: %lu.%09lu", rx_ts.seconds, rx_ts.nanoseconds);
+                                } else {
+                                    ESP_LOGD(TAG, "stored rx ts (msg_type=0x%02x): %lu.%09lu",
+                                             info.message_type, rx_ts.seconds, rx_ts.nanoseconds);
+                                }
                             }
                             /* pass the buffer and optional rx info to stack */
                             emac->eth->stack_input_info(emac->eth, buffer, buf_len, rx_info);

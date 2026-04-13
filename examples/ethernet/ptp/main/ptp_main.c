@@ -228,7 +228,7 @@ void app_main(void)
     // register callback function which will toggle output pin
     esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
 
-    int pid = ptpd_start("ETH_0");
+    int pid = ptpd_start("ETH_0", s_eth_handles[0]);
 
     struct timespec cur_time = {0, 0};
     // wait for the clock to be available

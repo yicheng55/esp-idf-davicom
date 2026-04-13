@@ -34,6 +34,9 @@
 #ifndef FAR
 #define FAR
 #endif
+#ifdef ESP_PTP
+#include "esp_eth.h"
+#endif
 
 /****************************************************************************
  * Included Files
@@ -138,7 +141,11 @@ extern "C"
  *
  ****************************************************************************/
 
+#ifdef ESP_PTP
+int ptpd_start(FAR const char *interface, esp_eth_handle_t eth_handle);
+#else
 int ptpd_start(FAR const char *interface);
+#endif
 
 /****************************************************************************
  * Name: ptpd_status
