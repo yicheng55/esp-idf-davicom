@@ -93,6 +93,11 @@
 #define IP_HDR_LEN           20
 #define UDP_HDR_LEN          8
 #define UDP_IPV4_EXTRA_HDR   (IP_HDR_LEN + UDP_HDR_LEN)
+#ifdef SO_TIMESTAMPNS
+#define PTP_UDP_RX_SW_TIMESTAMP_NS 1
+#else
+#define PTP_UDP_RX_SW_TIMESTAMP_NS 0
+#endif
 #ifdef SO_TIMESTAMP
 #define PTP_UDP_RX_SW_TIMESTAMP 1
 #else
@@ -460,23 +465,35 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 {
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
   /* UDP/IPv4 mode: use sendto() — lwIP builds the IP/UDP headers.
-   * TX hardware timestamping is not available via UDP socket, so use
-   * CLOCK_PTP_SYSTEM via ptp_gettime() to keep T3 on the same clock
-   * domain as T4 (returned by the master in DELAY_RESP). */
+   * After send completes, query the MAC's last TX timestamp so T3 tracks
+   * the actual transmit event more closely than a pre-send clock sample. */
   uint8_t msg_type_nibble = ((struct ptp_header_s *)ptp_msg)->messagetype & PTP_MSGTYPE_MASK;
   uint16_t udp_port = (msg_type_nibble < 8) ? PTP_EVENT_PORT : PTP_GENERAL_PORT;
 
   struct sockaddr_in dst;
+  int ret;
   memset(&dst, 0, sizeof(dst));
   dst.sin_family      = AF_INET;
   dst.sin_port        = htons(udp_port);
   dst.sin_addr.s_addr = inet_addr("224.0.1.129");
 
-  if (ts) {
-    ptp_gettime(state, ts);
+  ret = sendto(state->tx_socket, ptp_msg, ptp_msg_len, 0,
+               (struct sockaddr *)&dst, sizeof(dst));
+
+  if (ret > 0 && ts) {
+    esp_err_t tx_ts_ret = esp_eth_clock_get_tx_time(state->eth_handle, ts);
+    if (tx_ts_ret != ESP_OK) {
+      if (ptp_gettime(state, ts) == OK) {
+        ptpwarn("Falling back to CLOCK_PTP_SYSTEM for TX timestamp: %s",
+                esp_err_to_name(tx_ts_ret));
+      } else {
+        ptperr("Failed to get TX timestamp: tx_ts=%s errno=%d",
+               esp_err_to_name(tx_ts_ret), errno);
+      }
+    }
   }
-  return sendto(state->tx_socket, ptp_msg, ptp_msg_len, 0,
-                (struct sockaddr *)&dst, sizeof(dst));
+
+  return ret;
 #else
   /* 802.3 mode: use L2TAP write with hardware timestamp */
   uint16_t frame_len = ETH_HEADER_LEN + ptp_msg_len;
@@ -540,7 +557,7 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   memset(&rxhdr, 0, sizeof(rxhdr));
   rxhdr.msg_iov        = &iov;
   rxhdr.msg_iovlen     = 1;
-#if PTP_UDP_RX_SW_TIMESTAMP
+#if PTP_UDP_RX_SW_TIMESTAMP_NS || PTP_UDP_RX_SW_TIMESTAMP
   rxhdr.msg_control    = state->rxcmsg;
   rxhdr.msg_controllen = sizeof(state->rxcmsg);
 #endif
@@ -548,10 +565,20 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   int ret = recvmsg(state->event_socket, &rxhdr, MSG_DONTWAIT);
 
   if (ret > 0 && ts) {
-#if PTP_UDP_RX_SW_TIMESTAMP
+#if PTP_UDP_RX_SW_TIMESTAMP_NS || PTP_UDP_RX_SW_TIMESTAMP
     /* Try to extract SO_TIMESTAMP from cmsg (timeval -> timespec). */
     bool got_ts = false;
     for (struct cmsghdr *c = CMSG_FIRSTHDR(&rxhdr); c != NULL; c = CMSG_NXTHDR(&rxhdr, c)) {
+#if PTP_UDP_RX_SW_TIMESTAMP_NS
+      if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_TIMESTAMPNS
+          && c->cmsg_len == CMSG_LEN(sizeof(struct timespec))) {
+        struct timespec *packet_ts = (struct timespec *)CMSG_DATA(c);
+        *ts = *packet_ts;
+        got_ts = true;
+        break;
+      }
+#endif
+#if PTP_UDP_RX_SW_TIMESTAMP
       if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_TIMESTAMP
           && c->cmsg_len == CMSG_LEN(sizeof(struct timeval))) {
         struct timeval *tv = (struct timeval *)CMSG_DATA(c);
@@ -560,6 +587,7 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
         got_ts = true;
         break;
       }
+#endif
     }
     if (!got_ts) {
       clock_gettime(CLOCK_REALTIME, ts);
@@ -794,24 +822,8 @@ static int ptp_get_delay_resp_timestamp(FAR struct ptp_state_s *state,
                                         FAR struct timespec *ts)
 {
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
-  esp_err_t ret = esp_eth_clock_get_rx_time(state->eth_handle, ts);
-  if (ret == ESP_OK)
-    {
-      ptpdbg("Using hardware RX timestamp for Delay_Resp: %lld.%09ld",
-             (long long)ts->tv_sec, (long)ts->tv_nsec);
-      return OK;
-    }
-
-  if (ptp_gettime(state, ts) == OK)
-    {
-      ptpwarn("Falling back to CLOCK_PTP_SYSTEM for Delay_Resp timestamp: %s",
-              esp_err_to_name(ret));
-      return OK;
-    }
-
-  ptperr("Failed to get Delay_Resp timestamp: rx_ts=%s errno=%d",
-         esp_err_to_name(ret), errno);
-  return ERROR;
+  *ts = state->rxtime;
+  return OK;
 #else
   *ts = state->rxtime;
   return OK;
@@ -995,7 +1007,11 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     ptperr("Failed to join PTP multicast on event socket: %d\n", errno);
     return ERROR;
   }
-#if PTP_UDP_RX_SW_TIMESTAMP
+#if PTP_UDP_RX_SW_TIMESTAMP_NS
+  // Enable ancillary RX timestamps for packet-bound UDP receive timestamps when available.
+  int ts_en = 1;
+  setsockopt(state->event_socket, SOL_SOCKET, SO_TIMESTAMPNS, &ts_en, sizeof(ts_en));
+#elif PTP_UDP_RX_SW_TIMESTAMP
   // Enable SO_TIMESTAMP for kernel-level RX timestamps when available.
   int ts_en = 1;
   setsockopt(state->event_socket, SOL_SOCKET, SO_TIMESTAMP, &ts_en, sizeof(ts_en));

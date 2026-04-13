@@ -119,6 +119,22 @@ esp_err_t esp_eth_clock_get_rx_time(esp_eth_handle_t eth_handle, struct timespec
     return ESP_OK;
 }
 
+esp_err_t esp_eth_clock_get_tx_time(esp_eth_handle_t eth_handle, struct timespec *tp)
+{
+    if (!eth_handle || !tp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    eth_mac_time_t ptp_tx_time;
+    esp_err_t ret = esp_eth_ioctl(eth_handle, ETH_MAC_ESP_CMD_G_PTP_TX_TIME, &ptp_tx_time);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    tp->tv_sec = ptp_tx_time.seconds;
+    tp->tv_nsec = ptp_tx_time.nanoseconds;
+    return ESP_OK;
+}
+
 int esp_eth_clock_set_target_time(clockid_t clock_id, struct timespec *tp)
 {
     eth_mac_time_t mac_target_time = {

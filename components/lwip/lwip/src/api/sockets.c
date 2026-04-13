@@ -196,6 +196,51 @@ static void sockaddr_to_ipaddr_port(const struct sockaddr *sockaddr, ip_addr_t *
 #define DOMAIN_TO_NETCONN_TYPE(domain, netconn_type) (netconn_type)
 #endif /* LWIP_IPV6 */
 
+static size_t
+lwip_msghdr_write_timestampns(struct msghdr *msg, size_t used, const struct timespec *ts)
+{
+  if ((msg->msg_controllen - used) < CMSG_SPACE(sizeof(struct timespec))) {
+    msg->msg_flags |= MSG_CTRUNC;
+    return used;
+  }
+
+  {
+    struct cmsghdr *chdr = (struct cmsghdr *)((u8_t *)msg->msg_control + used);
+    struct timespec *data = (struct timespec *)CMSG_DATA(chdr);
+
+    chdr->cmsg_level = SOL_SOCKET;
+    chdr->cmsg_type = SO_TIMESTAMPNS;
+    chdr->cmsg_len = CMSG_LEN(sizeof(struct timespec));
+    *data = *ts;
+  }
+
+  return used + CMSG_SPACE(sizeof(struct timespec));
+}
+
+#if LWIP_NETBUF_RECVINFO
+static size_t
+lwip_msghdr_write_pktinfo(struct msghdr *msg, size_t used, const struct netbuf *buf)
+{
+  if ((msg->msg_controllen - used) < CMSG_SPACE(sizeof(struct in_pktinfo))) {
+    msg->msg_flags |= MSG_CTRUNC;
+    return used;
+  }
+
+  {
+    struct cmsghdr *chdr = (struct cmsghdr *)((u8_t *)msg->msg_control + used);
+    struct in_pktinfo *pkti = (struct in_pktinfo *)CMSG_DATA(chdr);
+
+    chdr->cmsg_level = IPPROTO_IP;
+    chdr->cmsg_type = IP_PKTINFO;
+    chdr->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+    pkti->ipi_ifindex = buf->p->if_idx;
+    inet_addr_from_ip4addr(&pkti->ipi_addr, ip_2_ip4(netbuf_destaddr(buf)));
+  }
+
+  return used + CMSG_SPACE(sizeof(struct in_pktinfo));
+}
+#endif /* LWIP_NETBUF_RECVINFO */
+
 #define IS_SOCK_ADDR_TYPE_VALID_OR_UNSPEC(name)    (((name)->sa_family == AF_UNSPEC) || \
                                                     IS_SOCK_ADDR_TYPE_VALID(name))
 #define SOCK_ADDR_TYPE_MATCH_OR_UNSPEC(name, sock) (((name)->sa_family == AF_UNSPEC) || \
@@ -482,10 +527,10 @@ tryget_socket_unconn_locked(int fd)
 {
   struct lwip_sock *ret = tryget_socket_unconn_nouse(fd);
   if (ret != NULL) {
-#if ESP_LWIP      
+#if ESP_LWIP
     if (ret->conn == NULL)
       return NULL;
-#endif /* ESP_LWIP */         
+#endif /* ESP_LWIP */
     if (!sock_inc_used_locked(ret)) {
       return NULL;
     }
@@ -1201,30 +1246,30 @@ lwip_recvfrom_udp_raw(struct lwip_sock *sock, int flags, struct msghdr *msg, u16
 
   if (msg->msg_control) {
     u8_t wrote_msg = 0;
+    size_t used = 0;
+
+    if ((sock->conn->flags & NETCONN_FLAG_RX_TIMESTAMP) != 0 &&
+        (buf->flags & NETBUF_FLAG_RX_TIMESTAMP) != 0) {
+      size_t new_used = lwip_msghdr_write_timestampns(msg, used, &buf->rx_timestamp);
+      wrote_msg = (new_used != used) ? 1 : wrote_msg;
+      used = new_used;
+    }
 #if LWIP_NETBUF_RECVINFO
     /* Check if packet info was recorded */
     if (buf->flags & NETBUF_FLAG_DESTADDR) {
       if (IP_IS_V4(&buf->toaddr)) {
 #if LWIP_IPV4
-        if (msg->msg_controllen >= CMSG_SPACE(sizeof(struct in_pktinfo))) {
-          struct cmsghdr *chdr = CMSG_FIRSTHDR(msg); /* This will always return a header!! */
-          struct in_pktinfo *pkti = (struct in_pktinfo *)CMSG_DATA(chdr);
-          chdr->cmsg_level = IPPROTO_IP;
-          chdr->cmsg_type = IP_PKTINFO;
-          chdr->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
-          pkti->ipi_ifindex = buf->p->if_idx;
-          inet_addr_from_ip4addr(&pkti->ipi_addr, ip_2_ip4(netbuf_destaddr(buf)));
-          msg->msg_controllen = CMSG_SPACE(sizeof(struct in_pktinfo));
-          wrote_msg = 1;
-        } else {
-          msg->msg_flags |= MSG_CTRUNC;
-        }
+        size_t new_used = lwip_msghdr_write_pktinfo(msg, used, buf);
+        wrote_msg = (new_used != used) ? 1 : wrote_msg;
+        used = new_used;
 #endif /* LWIP_IPV4 */
       }
     }
 #endif /* LWIP_NETBUF_RECVINFO */
 
-    if (!wrote_msg) {
+    if (wrote_msg) {
+      msg->msg_controllen = used;
+    } else {
       msg->msg_controllen = 0;
     }
   }
@@ -3500,6 +3545,14 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
           }
           break;
 #endif /* LWIP_UDP */
+        case SO_TIMESTAMPNS:
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, optlen, int);
+          if (*(const int *)optval) {
+            sock->conn->flags |= NETCONN_FLAG_RX_TIMESTAMP;
+          } else {
+            sock->conn->flags &= ~NETCONN_FLAG_RX_TIMESTAMP;
+          }
+          break;
         case SO_BINDTODEVICE: {
           const struct ifreq *iface;
           struct netif *n = NULL;

@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "lwip/opt.h"
 #include "lwip/pbuf.h"
 #include "lwip/ethip6.h"
@@ -134,6 +135,9 @@ esp_netif_recv_ret_t ethernetif_input(void *h, void *buffer, size_t len, void *l
     if (p == NULL) {
         esp_netif_free_rx_buffer(esp_netif, buffer);
         return ESP_NETIF_OPTIONAL_RETURN_CODE(ESP_ERR_NO_MEM);
+    }
+    if (l2_buff != NULL) {
+        esp_pbuf_set_rx_timestamp(p, (const struct timespec *)l2_buff);
     }
     /* full packet send to tcpip_thread to process */
     if (unlikely(netif->input(p, netif) != ERR_OK)) {

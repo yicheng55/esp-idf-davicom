@@ -92,6 +92,8 @@ extern "C" {
 #endif /* LWIP_NETBUF_RECVINFO */
 /** A FIN has been received but not passed to the application yet */
 #define NETCONN_FIN_RX_PENDING                0x80
+/** Received packet-bound RX timestamps will be recorded for this netconn */
+#define NETCONN_FLAG_RX_TIMESTAMP             0x100
 
 /* Helpers to process several netconn_types by the same code */
 #define NETCONNTYPE_GROUP(t)         ((t)&0xF0)

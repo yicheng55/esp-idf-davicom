@@ -47,6 +47,10 @@
 #include "lwip/ip_addr.h"
 #include "lwip/ip6_addr.h"
 
+#if LWIP_SOCKET
+#include <time.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -55,19 +59,26 @@ extern "C" {
 #define NETBUF_FLAG_DESTADDR    0x01
 /** This netbuf includes a checksum */
 #define NETBUF_FLAG_CHKSUM      0x02
+/** This netbuf includes a packet-bound RX timestamp */
+#define NETBUF_FLAG_RX_TIMESTAMP 0x04
 
 /** "Network buffer" - contains data and addressing info */
 struct netbuf {
   struct pbuf *p, *ptr;
   ip_addr_t addr;
   u16_t port;
-#if LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY
+#if LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY || LWIP_SOCKET
   u8_t flags;
+#endif /* LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY || LWIP_SOCKET */
+#if LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY
   u16_t toport_chksum;
 #if LWIP_NETBUF_RECVINFO
   ip_addr_t toaddr;
 #endif /* LWIP_NETBUF_RECVINFO */
 #endif /* LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY */
+#if LWIP_SOCKET
+  struct timespec rx_timestamp;
+#endif /* LWIP_SOCKET */
 };
 
 /* Network buffer functions: */

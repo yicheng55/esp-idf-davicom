@@ -52,6 +52,7 @@
 #include "lwip/igmp.h"
 #include "lwip/dns.h"
 #include "lwip/mld6.h"
+#include "lwip/esp_pbuf_ref.h"
 #include "lwip/priv/tcpip_priv.h"
 
 #include <string.h>
@@ -268,6 +269,7 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     buf->ptr = p;
     ip_addr_set(&buf->addr, addr);
     buf->port = port;
+    buf->flags = 0;
 #if LWIP_NETBUF_RECVINFO
     if (conn->flags & NETCONN_FLAG_PKTINFO) {
       /* get the UDP header - always in the first pbuf, ensured by udp_input */
@@ -277,6 +279,10 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
       buf->toport_chksum = udphdr->dest;
     }
 #endif /* LWIP_NETBUF_RECVINFO */
+    if ((conn->flags & NETCONN_FLAG_RX_TIMESTAMP) != 0 &&
+        esp_pbuf_get_rx_timestamp(buf->p, &buf->rx_timestamp)) {
+      buf->flags |= NETBUF_FLAG_RX_TIMESTAMP;
+    }
   }
 
   len = p->tot_len;

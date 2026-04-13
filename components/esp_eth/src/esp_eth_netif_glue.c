@@ -5,6 +5,7 @@
  */
 #include <stdlib.h>
 #include <inttypes.h>
+#include <time.h>
 #include "esp_netif.h"
 #include "esp_eth_netif_glue.h"
 #include "esp_netif_net_stack.h"
@@ -31,6 +32,8 @@ struct esp_eth_netif_glue_t {
 
 static esp_err_t eth_input_to_netif(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv, void *info)
 {
+    struct timespec rx_ts = {0};
+    void *netif_extra = NULL;
 #if CONFIG_ESP_NETIF_L2_TAP
     esp_err_t ret = ESP_OK;
     ret = esp_vfs_l2tap_eth_filter_frame(eth_handle, buffer, (size_t *)&length, info);
@@ -38,7 +41,13 @@ static esp_err_t eth_input_to_netif(esp_eth_handle_t eth_handle, uint8_t *buffer
         return ret;
     }
 #endif
-    return esp_netif_receive((esp_netif_t *)priv, buffer, length, NULL);
+    if (info != NULL) {
+        const eth_mac_time_t *mac_ts = (const eth_mac_time_t *)info;
+        rx_ts.tv_sec = mac_ts->seconds;
+        rx_ts.tv_nsec = mac_ts->nanoseconds;
+        netif_extra = &rx_ts;
+    }
+    return esp_netif_receive((esp_netif_t *)priv, buffer, length, netif_extra);
 }
 
 static void eth_l2_free(void *h, void* buffer)
