@@ -334,6 +334,10 @@ static struct ptp_state_s *s_state;
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+/* Forward declaration: needed by ptp_net_send() which is defined before ptp_gettime() */
+static int ptp_gettime(FAR struct ptp_state_s *state, FAR struct timespec *ts);
+
 #ifdef ESP_PTP
 static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, void *ptp_msg, uint16_t ptp_msg_len)
 {
@@ -456,8 +460,9 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 {
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
   /* UDP/IPv4 mode: use sendto() — lwIP builds the IP/UDP headers.
-   * TX hardware timestamping is not available via UDP socket, so fall back
-   * to software timestamp (same as the !ESP_PTP reference implementation). */
+   * TX hardware timestamping is not available via UDP socket, so use
+   * CLOCK_PTP_SYSTEM via ptp_gettime() to keep T3 on the same clock
+   * domain as T4 (returned by the master in DELAY_RESP). */
   uint8_t msg_type_nibble = ((struct ptp_header_s *)ptp_msg)->messagetype & PTP_MSGTYPE_MASK;
   uint16_t udp_port = (msg_type_nibble < 8) ? PTP_EVENT_PORT : PTP_GENERAL_PORT;
 
@@ -468,7 +473,7 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   dst.sin_addr.s_addr = inet_addr("224.0.1.129");
 
   if (ts) {
-    clock_gettime(CLOCK_REALTIME, ts);
+    ptp_gettime(state, ts);
   }
   return sendto(state->tx_socket, ptp_msg, ptp_msg_len, 0,
                 (struct sockaddr *)&dst, sizeof(dst));
