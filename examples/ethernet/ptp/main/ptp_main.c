@@ -158,12 +158,22 @@ void app_main(void)
 
     esp_eth_clock_cfg_t clock_cfg = {
         .eth_hndl  = s_eth_handles[0],
+#ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+        .transport = ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4,
+#else
         .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
+#endif
     };
     esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clock_cfg);
 
     // register callback function which will toggle output pin
     esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
+
+#ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+    // UDP/IPv4 transport: pass eth_handle so ptpd can read TX timestamps via ioctl
+    // and register the stack_input_info callback for RX hardware timestamps.
+    ptpd_set_eth_handle(s_eth_handles[0]);
+#endif
 
     int pid = ptpd_start("ETH_0");
 

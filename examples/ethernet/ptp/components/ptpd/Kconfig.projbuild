@@ -18,6 +18,20 @@ menu "PTP Daemon Configuration"
 
     if NETUTILS_PTPD
 
+        config NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+            bool "Use UDP/IPv4 transport (lwIP sockets) instead of IEEE 802.3 L2TAP"
+            default n
+            help
+                When enabled, PTP messages are sent/received over UDP/IPv4
+                (ports 319/320, multicast 224.0.1.129) using lwIP UDP sockets,
+                instead of the default IEEE 802.3 raw Ethernet frames via L2TAP.
+                TX hardware timestamps are retrieved from DM9058 via ioctl after
+                sendto(). RX hardware timestamps are captured via a custom
+                stack_input_info callback and delivered through a FreeRTOS queue,
+                achieving full hardware timestamp precision equivalent to L2TAP.
+                The DM9058 must be configured with UDP/IPv4 transport offsets.
+                Interoperates with standard PTP devices such as ptp4l (UDP mode).
+
         config NETUTILS_PTPD_DEBUG
             bool "Enable PTP debug messages"
             default n

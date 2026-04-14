@@ -31,6 +31,7 @@
 
 // ESP_PTP
 #include <time.h>
+#include "esp_eth.h"
 #ifndef FAR
 #define FAR
 #endif
@@ -139,6 +140,22 @@ extern "C"
  ****************************************************************************/
 
 int ptpd_start(FAR const char *interface);
+
+/****************************************************************************
+ * Name: ptpd_set_eth_handle
+ *
+ * Description:
+ *   Pre-register the Ethernet driver handle used by the PTP daemon.
+ *   Must be called before ptpd_start() when CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+ *   is enabled, so that the daemon can read TX hardware timestamps from the
+ *   DM9058 after each sendto() and register the stack_input_info callback.
+ *
+ * Input Parameters:
+ *   eth_handle - Handle returned by esp_eth_driver_install()
+ *
+ ****************************************************************************/
+
+void ptpd_set_eth_handle(esp_eth_handle_t eth_handle);
 
 /****************************************************************************
  * Name: ptpd_status

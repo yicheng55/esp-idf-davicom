@@ -81,6 +81,19 @@
 
 #include "esp_eth_time.h"
 
+#ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include "esp_netif.h"
+#include "freertos/queue.h"
+#include "esp_eth_mac_spi.h"  // eth_mac_time_t, ETH_MAC_DM9058_CMD_G_PTP_TX_TIME
+#include "freertos/task.h"    // vTaskDelay
+/* eth_mac_time_t  { uint32_t seconds; uint32_t nanoseconds; }
+ * This is identical in memory layout to esp_eth_ptp_dm9058_time_t (private header).
+ * Both have seconds at offset 0 and nanoseconds at offset 4, so casting between them
+ * is safe and avoids depending on the private internal header. */
+#endif
+
 #define ETH_TYPE_PTP 0x88F7
 
 #define SET_MAC_ADDR(addr, a, b, c, d, e, f) do { \
@@ -159,8 +172,14 @@ struct ptp_state_s
 
 #ifdef ESP_PTP
   uint8_t intf_hw_addr[ETH_ADDR_LEN];
-  int ptp_socket;
   esp_eth_handle_t eth_handle;
+
+#ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+  int event_socket_udp;   /* UDP port 319 — PTP event messages */
+  int gen_socket_udp;     /* UDP port 320 — PTP general messages */
+#else
+  int ptp_socket;         /* L2TAP raw Ethernet socket */
+#endif
 
   int64_t remote_time_ns_prev;
   int64_t local_time_ns_prev;
@@ -302,7 +321,20 @@ static const char *TAG = "ptpd";
 
 #ifdef ESP_PTP
 static struct ptp_state_s *s_state;
-#endif
+static esp_eth_handle_t    s_eth_handle_override = NULL;
+
+#ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+/* PTP UDP/IPv4 transport constants */
+#define PTP_MULTICAST_ADDR    0xE0000181UL  /* 224.0.1.129 in host byte order */
+#define PTP_UDP_PORT_EVENT    319
+#define PTP_UDP_PORT_GENERAL  320
+
+/* FreeRTOS queues for hardware timestamp delivery (depth=1, overwrite-on-full) */
+static QueueHandle_t s_ptp_rx_ts_queue = NULL;
+static QueueHandle_t s_ptp_tx_ts_queue = NULL;
+static esp_netif_t  *s_ptp_netif       = NULL;
+#endif /* CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
+#endif /* ESP_PTP */
 
 /****************************************************************************
  * Private Functions
@@ -321,6 +353,7 @@ static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, 
   memcpy(eth_frame + sizeof(eth_hdr), ptp_msg, ptp_msg_len);
 }
 
+#ifndef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
 static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
@@ -354,6 +387,7 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 
   return ret;
 }
+#endif /* !CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
 
 static const char *ptp_msgtype_name(uint8_t type)
 {
@@ -367,6 +401,7 @@ static const char *ptp_msgtype_name(uint8_t type)
   }
 }
 
+#ifndef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
 static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
@@ -402,12 +437,145 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 
   return ret;
 }
+#endif /* !CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
 
 static int64_t timespec_to_ns(FAR const struct timespec *ts)
 {
   return ts->tv_sec * NSEC_PER_SEC + (ts->tv_nsec);
 }
+
+#ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+
+/* Returns true for PTP event messages (Sync, Delay_Req, etc., port 319).
+ * PTP messageType nibble: bit 3 == 0 → event, bit 3 == 1 → general.
+ */
+static bool ptp_msg_is_event(const void *msg)
+{
+  return (((const uint8_t *)msg)[0] & 0x08) == 0;
+}
+
+/* Custom stack_input_info callback registered via esp_eth_update_input_path_info().
+ * Intercepts DM9058 hardware RX timestamps (delivered as info = esp_eth_ptp_dm9058_time_t*)
+ * and pushes them into s_ptp_rx_ts_queue, then forwards the frame to lwIP via
+ * esp_netif_receive() so normal UDP socket operation is unaffected.
+ */
+static esp_err_t ptp_udp_stack_input_info(esp_eth_handle_t hdl,
+                                           uint8_t *buffer, uint32_t length,
+                                           void *priv, void *info)
+{
+  if (info != NULL && s_ptp_rx_ts_queue != NULL) {
+    /* info points to eth_mac_time_t (same layout as private esp_eth_ptp_dm9058_time_t:
+     * seconds at offset 0, nanoseconds at offset 4) set by the DM9058 driver task. */
+    eth_mac_time_t *hw_ts = (eth_mac_time_t *)info;
+    struct timespec ts = {
+      .tv_sec  = (time_t)hw_ts->seconds,
+      .tv_nsec = (long)hw_ts->nanoseconds
+    };
+    /* xQueueOverwrite does not block and replaces any stale entry */
+    xQueueOverwrite(s_ptp_rx_ts_queue, &ts);
+    ptpdbg("RX hw ts captured: %lld.%09ld", (long long)ts.tv_sec, ts.tv_nsec);
+  }
+  /* Forward frame to lwIP — priv carries the esp_netif_t* set during init */
+  esp_netif_t *netif = (esp_netif_t *)priv;
+  return esp_netif_receive(netif, buffer, length, NULL);
+}
+
+/* Send a PTP message over UDP/IPv4.
+ * For event messages (port 319), reads the TX hardware timestamp from DM9058
+ * via ioctl after sendto() and delivers it through s_ptp_tx_ts_queue,
+ * mimicking the Linux poll(POLLPRI) + recvmsg(MSG_ERRQUEUE) pattern.
+ */
+static int ptp_net_send_udp(FAR struct ptp_state_s *state,
+                             void *ptp_msg, uint16_t ptp_msg_len,
+                             struct timespec *ts)
+{
+  bool is_event = ptp_msg_is_event(ptp_msg);
+  struct sockaddr_in dest;
+  memset(&dest, 0, sizeof(dest));
+  dest.sin_family      = AF_INET;
+  dest.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  dest.sin_port        = htons(is_event ? PTP_UDP_PORT_EVENT
+                                        : PTP_UDP_PORT_GENERAL);
+
+  int sock = is_event ? state->event_socket_udp : state->gen_socket_udp;
+  int ret  = sendto(sock, ptp_msg, ptp_msg_len, 0,
+                    (struct sockaddr *)&dest, sizeof(dest));
+
+  /* Retrieve TX hardware timestamp only for event messages (Sync, Delay_Req) */
+  if (ret > 0 && ts && is_event) {
+    /* DM9058 TX at 100 Mbps: 128-byte PTP frame ≈ 10 µs.
+     * A 1-ms FreeRTOS tick delay is sufficient to ensure the MAC has latched
+     * the TX timestamp into its register before we read it. */
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    eth_mac_time_t tx_ts = {0};
+    if (esp_eth_ioctl(state->eth_handle,
+                      ETH_MAC_DM9058_CMD_G_PTP_TX_TIME,
+                      &tx_ts) == ESP_OK) {
+      struct timespec queued_ts = {
+        .tv_sec  = (time_t)tx_ts.seconds,
+        .tv_nsec = (long)tx_ts.nanoseconds
+      };
+      if (s_ptp_tx_ts_queue != NULL) {
+        xQueueOverwrite(s_ptp_tx_ts_queue, &queued_ts);
+        /* Pop immediately — simulates the MSG_ERRQUEUE read */
+        if (xQueueReceive(s_ptp_tx_ts_queue, ts, pdMS_TO_TICKS(2)) != pdTRUE) {
+          *ts = queued_ts;  /* fallback: use value directly */
+        }
+        ptpdbg("TX hw ts: %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
+      }
+    }
+  }
+  return ret;
+}
+
+/* Receive a PTP message from a UDP socket.
+ * After recvfrom() succeeds, pop the hardware RX timestamp that was pushed by
+ * ptp_udp_stack_input_info() into s_ptp_rx_ts_queue.  The callback runs in the
+ * DM9058 RX task context before lwIP/recvfrom() returns, so the queue entry
+ * should already be present.  A 1-ms timeout covers any scheduling jitter.
+ */
+static int ptp_net_recv_udp(FAR struct ptp_state_s *state,
+                             void *ptp_msg, uint16_t ptp_msg_len,
+                             struct timespec *ts, int sock)
+{
+  struct sockaddr_in src_addr;
+  socklen_t src_len = sizeof(src_addr);
+  int ret = recvfrom(sock, ptp_msg, ptp_msg_len, MSG_DONTWAIT,
+                     (struct sockaddr *)&src_addr, &src_len);
+
+  if (ret > 0 && ts) {
+    if (s_ptp_rx_ts_queue != NULL &&
+        xQueueReceive(s_ptp_rx_ts_queue, ts, pdMS_TO_TICKS(1)) == pdTRUE) {
+      ptpdbg("RX hw ts from queue: %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
+    } else {
+      /* Fallback: read PTP hardware clock — still DM9058, very close to actual RX time */
+      esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, ts);
+      ptpdbg("RX ts fallback (clock): %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
+    }
+  }
+  return ret;
+}
+
+#endif /* CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
+
 #endif // ESP_PTP
+
+#ifdef ESP_PTP
+/* Transport-agnostic send dispatcher.
+ * Calls ptp_net_send_udp() when UDP/IPv4 transport is configured,
+ * otherwise falls back to the L2TAP ptp_net_send(). */
+static inline int ptp_send(FAR struct ptp_state_s *state,
+                            void *msg, uint16_t len,
+                            struct timespec *ts)
+{
+#ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+  return ptp_net_send_udp(state, msg, len, ts);
+#else
+  return ptp_net_send(state, msg, len, ts);
+#endif
+}
+#endif /* ESP_PTP */
 
 /* Convert from timespec to PTP format */
 
@@ -670,6 +838,10 @@ static int ptp_getrxtime(FAR struct ptp_state_s *state,
 static int ptp_initialize_state(FAR struct ptp_state_s *state,
                                 FAR const char *interface)
 {
+#ifndef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+  /* ------------------------------------------------------------------ */
+  /* L2TAP / IEEE 802.3 transport path (existing)                        */
+  /* ------------------------------------------------------------------ */
   state->ptp_socket = open("/dev/net/tap", 0);
   if (state->ptp_socket < 0)
   {
@@ -698,14 +870,6 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     return ERROR;
   }
   ptpinfo("L2TAP eth handle: %p", (void *)state->eth_handle);
-  // esp_eth_clock_cfg_t clk_cfg = {
-  //   .eth_hndl  = state->eth_handle,
-  //   .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
-  // };
-
-  // Note: clock_init will enable PTP HW timestamping in DM9058 driver, so it should be called before enabling time stamping in L2TAP to ensure timestamps are generated for received frames and can be retrieved in L2TAP.
-  // ptpinfo("esp_eth_clock_init cfg.eth_hndl: %p", (void *)clk_cfg.eth_hndl);
-  // esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
 
   // Enable time stamping in L2TAP
   if(ioctl(state->ptp_socket, L2TAP_S_TIMESTAMP_EN) < 0)
@@ -714,15 +878,126 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     return ERROR;
   }
 
+  // Add well-known PTP multicast destination MAC addresses to the filter
+  {
+    uint8_t dest_addr[ETH_ADDR_LEN];
+    SET_MAC_ADDR(dest_addr, 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00);
+    esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+    SET_MAC_ADDR(dest_addr, 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E);
+    esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
+  }
+
+#else /* CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
+  /* ------------------------------------------------------------------ */
+  /* UDP/IPv4 transport path (new)                                       */
+  /* ------------------------------------------------------------------ */
+
+  /* eth_handle must be set by the caller via ptpd_set_eth_handle() before
+   * ptpd_start() is invoked. */
+  if (s_eth_handle_override == NULL) {
+    ptperr("UDP/IPv4 transport requires ptpd_set_eth_handle() before ptpd_start()\n");
+    return ERROR;
+  }
+  state->eth_handle = s_eth_handle_override;
+  ptpinfo("UDP/IPv4 eth handle: %p", (void *)state->eth_handle);
+
+  /* Create event socket (port 319) */
+  state->event_socket_udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (state->event_socket_udp < 0) {
+    ptperr("Failed to create UDP event socket: %d\n", errno);
+    return ERROR;
+  }
+
+  /* Create general socket (port 320) */
+  state->gen_socket_udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (state->gen_socket_udp < 0) {
+    ptperr("Failed to create UDP general socket: %d\n", errno);
+    close(state->event_socket_udp);
+    state->event_socket_udp = -1;
+    return ERROR;
+  }
+
+  /* SO_REUSEADDR on both sockets */
+  {
+    int reuse = 1;
+    setsockopt(state->event_socket_udp, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(state->gen_socket_udp,   SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  }
+
+  /* Join PTP primary multicast group 224.0.1.129 on both sockets */
+  {
+    struct ip_mreq mreq;
+    memset(&mreq, 0, sizeof(mreq));
+    mreq.imr_multiaddr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (setsockopt(state->event_socket_udp, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                   &mreq, sizeof(mreq)) < 0) {
+      ptperr("UDP event socket: join multicast failed: %d\n", errno);
+      return ERROR;
+    }
+    if (setsockopt(state->gen_socket_udp, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                   &mreq, sizeof(mreq)) < 0) {
+      ptperr("UDP general socket: join multicast failed: %d\n", errno);
+      return ERROR;
+    }
+  }
+
+  /* Bind event socket to port 319 */
+  {
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family      = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port        = htons(PTP_UDP_PORT_EVENT);
+    if (bind(state->event_socket_udp, (struct sockaddr *)&bind_addr,
+             sizeof(bind_addr)) < 0) {
+      ptperr("UDP event socket: bind port %d failed: %d\n",
+             PTP_UDP_PORT_EVENT, errno);
+      return ERROR;
+    }
+
+    /* Bind general socket to port 320 */
+    bind_addr.sin_port = htons(PTP_UDP_PORT_GENERAL);
+    if (bind(state->gen_socket_udp, (struct sockaddr *)&bind_addr,
+             sizeof(bind_addr)) < 0) {
+      ptperr("UDP general socket: bind port %d failed: %d\n",
+             PTP_UDP_PORT_GENERAL, errno);
+      return ERROR;
+    }
+  }
+
+  /* Create hardware timestamp queues (depth 1 — overwrite model) */
+  s_ptp_rx_ts_queue = xQueueCreate(1, sizeof(struct timespec));
+  s_ptp_tx_ts_queue = xQueueCreate(1, sizeof(struct timespec));
+  if (s_ptp_rx_ts_queue == NULL || s_ptp_tx_ts_queue == NULL) {
+    ptperr("Failed to create PTP timestamp queues\n");
+    return ERROR;
+  }
+
+  /* Register custom stack_input_info to intercept DM9058 RX hw timestamps.
+   * esp_netif_get_handle_from_ifkey() looks up the netif by the key string
+   * (e.g. "ETH_0") registered in esp_netif_attach(). */
+  s_ptp_netif = esp_netif_get_handle_from_ifkey(interface);
+  if (s_ptp_netif == NULL) {
+    ptperr("Cannot find netif for interface key '%s'\n", interface);
+    return ERROR;
+  }
+  if (esp_eth_update_input_path_info(state->eth_handle,
+                                     ptp_udp_stack_input_info,
+                                     s_ptp_netif) != ESP_OK) {
+    ptperr("Failed to register stack_input_info callback\n");
+    return ERROR;
+  }
+  ptpinfo("UDP/IPv4 transport: stack_input_info registered, netif=%p", (void *)s_ptp_netif);
+
+#endif /* CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
+
+  /* ------------------------------------------------------------------ */
+  /* Common setup (both transport paths)                                 */
+  /* ------------------------------------------------------------------ */
+
   // get HW address
   esp_eth_ioctl(state->eth_handle, ETH_CMD_G_MAC_ADDR, &state->intf_hw_addr);
-
-  // Add well-known PTP multicast destination MAC addresses to the filter
-  uint8_t dest_addr[ETH_ADDR_LEN];
-  SET_MAC_ADDR(dest_addr, 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00);
-  esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
-  SET_MAC_ADDR(dest_addr, 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E);
-  esp_eth_ioctl(state->eth_handle, ETH_CMD_ADD_MAC_FILTER, dest_addr);
 
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
@@ -918,7 +1193,9 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
 static int ptp_destroy_state(FAR struct ptp_state_s *state)
 {
 #ifdef ESP_PTP
-  // Remove well-known PTP multicast destination MAC addresses from the filter
+
+#ifndef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+  /* L2TAP cleanup */
   esp_eth_handle_t eth_handle;
   if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0)
   {
@@ -936,6 +1213,39 @@ static int ptp_destroy_state(FAR struct ptp_state_s *state)
     close(state->ptp_socket);
     state->ptp_socket = -1;
   }
+
+#else /* CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
+  /* UDP/IPv4 cleanup */
+
+  /* Restore the default lwIP input path (clears our stack_input_info hook) */
+  esp_eth_update_input_path(state->eth_handle, NULL, NULL);
+
+  /* Leave PTP multicast group */
+  if (state->event_socket_udp > 0 || state->gen_socket_udp > 0) {
+    struct ip_mreq mreq;
+    memset(&mreq, 0, sizeof(mreq));
+    mreq.imr_multiaddr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (state->event_socket_udp > 0) {
+      setsockopt(state->event_socket_udp, IPPROTO_IP, IP_DROP_MEMBERSHIP,
+                 &mreq, sizeof(mreq));
+      close(state->event_socket_udp);
+      state->event_socket_udp = -1;
+    }
+    if (state->gen_socket_udp > 0) {
+      setsockopt(state->gen_socket_udp, IPPROTO_IP, IP_DROP_MEMBERSHIP,
+                 &mreq, sizeof(mreq));
+      close(state->gen_socket_udp);
+      state->gen_socket_udp = -1;
+    }
+  }
+
+  /* Release FreeRTOS timestamp queues */
+  if (s_ptp_rx_ts_queue) { vQueueDelete(s_ptp_rx_ts_queue); s_ptp_rx_ts_queue = NULL; }
+  if (s_ptp_tx_ts_queue) { vQueueDelete(s_ptp_tx_ts_queue); s_ptp_tx_ts_queue = NULL; }
+  s_ptp_netif = NULL;
+#endif /* CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4 */
+
 #else
   struct in_addr mcast_addr;
 
@@ -1033,7 +1343,7 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
   timespec_to_ptp_format(&ts, msg.origintimestamp);
 
 #ifdef ESP_PTP
-  ret = ptp_net_send(state, &msg, sizeof(msg), NULL);
+  ret = ptp_send(state, &msg, sizeof(msg), NULL);
 #else
   ret = sendto(state->tx_socket, &msg, sizeof(msg), 0,
     (struct sockaddr *)&addr, sizeof(addr));
@@ -1106,7 +1416,7 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
   timespec_to_ptp_format(&ts, msg.origintimestamp);
 
 #ifdef ESP_PTP
-  ret = ptp_net_send(state, &msg, sizeof(msg), &ts);
+  ret = ptp_send(state, &msg, sizeof(msg), &ts);
 #else
   ret = sendmsg(state->tx_socket, &txhdr, 0);
 #endif // ESP_PTP
@@ -1134,7 +1444,7 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
   ret = sendto(state->tx_socket, &msg, sizeof(msg), 0,
                (struct sockaddr *)&addr, sizeof(addr));
 #else
-  ret = ptp_net_send(state, &msg, sizeof(msg), NULL);
+  ret = ptp_send(state, &msg, sizeof(msg), NULL);
 #endif // !ESP_PTP
   if (ret < 0)
     {
@@ -1178,7 +1488,7 @@ static int ptp_send_delay_req(FAR struct ptp_state_s *state)
   timespec_to_ptp_format(&state->delayreq_time, req.origintimestamp);
 
 #ifdef ESP_PTP
-  ret = ptp_net_send(state, &req, sizeof(req), &state->delayreq_time);
+  ret = ptp_send(state, &req, sizeof(req), &state->delayreq_time);
 #else
   ret = sendto(state->tx_socket, &req, sizeof(req), 0,
                (FAR struct sockaddr *)&addr, sizeof(addr));
@@ -1722,7 +2032,7 @@ static int ptp_process_delay_req(FAR struct ptp_state_s *state,
   resp.header.logmessageinterval = CONFIG_NETUTILS_PTPD_DELAYRESP_INTERVAL;
 
 #ifdef ESP_PTP
-  ret = ptp_net_send(state, &resp, sizeof(resp), NULL);
+  ret = ptp_send(state, &resp, sizeof(resp), NULL);
 #else
   ret = sendto(state->tx_socket, &resp, sizeof(resp), 0,
                (FAR struct sockaddr *)&addr, sizeof(addr));
@@ -1998,7 +2308,11 @@ static int ptp_daemon(int argc, FAR char** argv)
   FAR const char *interface = "eth0";
   FAR struct ptp_state_s *state;
 #ifdef ESP_PTP
-  struct pollfd pollfds[1]; // everything is received over one socket at L2
+#  ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+  struct pollfd pollfds[2]; // [0]=event port 319, [1]=general port 320
+#  else
+  struct pollfd pollfds[1]; // everything is received over one L2TAP socket
+#  endif
 #else
   struct pollfd pollfds[2];
   struct msghdr rxhdr;
@@ -2044,7 +2358,13 @@ static int ptp_daemon(int argc, FAR char** argv)
 
   pollfds[0].events = POLLIN;
 #ifdef ESP_PTP
+#  ifdef CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4
+  pollfds[0].fd     = state->event_socket_udp;
+  pollfds[1].events = POLLIN;
+  pollfds[1].fd     = state->gen_socket_udp;
+#  else
   pollfds[0].fd = state->ptp_socket;
+#  endif
 #else
   pollfds[0].fd = state->event_socket;
   pollfds[1].events = POLLIN;
@@ -2071,10 +2391,25 @@ static int ptp_daemon(int argc, FAR char** argv)
 #ifndef ESP_PTP
       pollfds[1].revents = 0;
       ret = poll(pollfds, 2, PTPD_POLL_INTERVAL);
+#elif defined(CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4)
+      pollfds[1].revents = 0;
+      ret = poll(pollfds, 2, PTPD_POLL_INTERVAL);
 #else
-	  ret = poll(pollfds, 1, PTPD_POLL_INTERVAL);
+      ret = poll(pollfds, 1, PTPD_POLL_INTERVAL);
 #endif // !ESP_PTP
 
+#if defined(ESP_PTP) && defined(CONFIG_NETUTILS_PTPD_TRANSPORT_UDP_IPV4)
+      /* UDP/IPv4 path: poll both event (319) and general (320) sockets */
+      for (int pfd_i = 0; pfd_i < 2; pfd_i++) {
+        if (pollfds[pfd_i].revents & POLLIN) {
+          ret = ptp_net_recv_udp(state, &state->rxbuf, sizeof(state->rxbuf),
+                                  &state->rxtime, pollfds[pfd_i].fd);
+          if (ret > 0) {
+            ptp_process_rx_packet(state, ret);
+          }
+        }
+      }
+#else
       if (pollfds[0].revents)
         {
           /* Receive time-critical packet, potentially with cmsg
@@ -2092,34 +2427,10 @@ static int ptp_daemon(int argc, FAR char** argv)
 #ifndef ESP_PTP
               ptp_getrxtime(state, &rxhdr, &state->rxtime);
 #endif
-#ifdef ESP_PTP
-              {
-                //esp32_DM9058_custom_ioctl()
-		            //to get 'emac->last_rx_timestamp'
-
-                // if( esp_eth_clock_get_rx_time(state->eth_handle, &state->rxtime) == ESP_OK) {
-                //   ptpdbg("RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                // } else {
-                //   ptpdbg("get_rx_timestamp: no hw timestamp available, keeping L2TAP timestamp");
-                // }
-
-                #if 0
-                eth_mac_time_t rx_ts = {0};
-                if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK)
-                {
-                  state->rxtime.tv_sec  = (time_t)rx_ts.seconds;
-                  state->rxtime.tv_nsec = (long)rx_ts.nanoseconds;
-                  ESP_LOGD(TAG, "RX hw timestamp: %lld.%09ld", (long long)state->rxtime.tv_sec, state->rxtime.tv_nsec);
-                } else
-                {
-                  ESP_LOGD(TAG, "ETH_MAC_DM9058_CMD_G_PTP_RX_TIME: no hw timestamp available, keeping L2TAP timestamp");
-                }
-                #endif // 0
-            }
-#endif // ESP_PTP
               ptp_process_rx_packet(state, ret);
             }
         }
+#endif /* ESP_PTP && UDP_IPV4 */
 
 #ifndef ESP_PTP
       if (pollfds[1].revents)
@@ -2161,6 +2472,15 @@ err:
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: ptpd_set_eth_handle
+ ****************************************************************************/
+
+void ptpd_set_eth_handle(esp_eth_handle_t eth_handle)
+{
+  s_eth_handle_override = eth_handle;
+}
 
 /****************************************************************************
  * Name: ptpd_start

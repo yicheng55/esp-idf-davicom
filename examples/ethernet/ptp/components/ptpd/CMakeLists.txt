@@ -1,5 +1,5 @@
 idf_component_register(SRCS "ptpd.c"
-                       PRIV_REQUIRES esp_eth esp_netif
+                       PRIV_REQUIRES esp_eth esp_netif freertos
                        INCLUDE_DIRS "." "./include")
 
 target_sources(${COMPONENT_LIB} PRIVATE "ptpd.c")
