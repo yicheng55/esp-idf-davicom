@@ -25,6 +25,27 @@ menu "PTP Daemon Configuration"
             help
                 Enable PTP debug messages even if CONFIG_DEBUG_NET_INFO is not enabled.
 
+        if EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+
+            config NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH
+                int "UDP/IPv4 timestamp queue depth"
+                default 16
+                range 4 128
+                help
+                    Per-socket queue depth used to match PTP packets with hardware
+                    timestamps in UDP/IPv4 transport mode. Separate queues are kept
+                    for RX/TX and for ports 319/320.
+
+            config NETUTILS_PTPD_UDP_TS_MATCH_TIMEOUT_MS
+                int "UDP/IPv4 timestamp queue match timeout (ms)"
+                default 200
+                range 1 5000
+                help
+                    Maximum time an unmatched timestamp entry can stay in the queue
+                    before being dropped as stale.
+
+        endif # EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+
         config NETUTILS_PTPD_CLIENT
             bool "Enable client support"
             default y

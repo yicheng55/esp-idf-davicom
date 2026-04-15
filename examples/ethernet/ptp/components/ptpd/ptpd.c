@@ -89,8 +89,19 @@
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
 #define PTP_EVENT_PORT       319
 #define PTP_GENERAL_PORT     320
+#define PTP_UDP_SOCKET_EVENT_IDX 0
+#define PTP_UDP_SOCKET_GENERAL_IDX 1
+#define PTP_UDP_SOCKET_COUNT 2
 #else
 #define PTP_ETH_FILTER_TYPE  ETH_TYPE_PTP
+#endif
+
+#ifndef CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH
+#define CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH 16
+#endif
+
+#ifndef CONFIG_NETUTILS_PTPD_UDP_TS_MATCH_TIMEOUT_MS
+#define CONFIG_NETUTILS_PTPD_UDP_TS_MATCH_TIMEOUT_MS 200
 #endif
 
 #define SET_MAC_ADDR(addr, a, b, c, d, e, f) do { \
@@ -148,6 +159,25 @@ typedef struct
   int32_t ki;
   int32_t drift_acc;
 } pi_cntrl_t;
+
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+typedef struct
+{
+  uint8_t msg_type;
+  uint16_t sequence;
+  uint16_t port;
+  struct timespec timestamp;
+  struct timespec enqueue_time;
+} ptp_udp_ts_entry_t;
+
+typedef struct
+{
+  ptp_udp_ts_entry_t entries[CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH];
+  uint16_t head;
+  uint16_t count;
+  uint32_t dropped;
+} ptp_udp_ts_queue_t;
+#endif
 #endif // ESP_PTP
 
 /* Carrier structure for querying PTPD status */
@@ -173,6 +203,9 @@ struct ptp_state_s
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
   int event_socket;    /* lwIP UDP socket on PTP event port 319 */
   int general_socket;  /* lwIP UDP socket on PTP general port 320 */
+  ptp_udp_ts_queue_t udp_rx_tsq[PTP_UDP_SOCKET_COUNT];
+  ptp_udp_ts_queue_t udp_tx_tsq[PTP_UDP_SOCKET_COUNT];
+  struct timespec udp_rx_fallback_ts[PTP_UDP_SOCKET_COUNT];
 #else
   int ptp_socket;      /* L2TAP raw socket (IEEE 802.3 mode) */
 #endif
@@ -319,6 +352,16 @@ static const char *TAG = "ptpd";
 #ifdef ESP_PTP
 static struct ptp_state_s *s_state;
 static esp_eth_handle_t s_eth_handle_param;  /* eth_handle passed in via ptpd_start() */
+
+static const char *ptp_msgtype_name(uint8_t type);
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+static void ptp_udp_ts_enqueue(struct ptp_state_s *state,
+                               bool tx_path,
+                               uint16_t port,
+                               uint8_t msg_type,
+                               uint16_t sequence,
+                               const struct timespec *timestamp);
+#endif
 #endif
 
 /****************************************************************************
@@ -345,7 +388,9 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 {
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
   /* UDP/IPv4 mode: use lwIP sendto() — no manual Ethernet/IP/UDP header needed */
-  uint8_t msg_type_nibble = ((struct ptp_header_s *)ptp_msg)->messagetype & PTP_MSGTYPE_MASK;
+  struct ptp_header_s *hdr = (struct ptp_header_s *)ptp_msg;
+  uint8_t msg_type_nibble = hdr->messagetype & PTP_MSGTYPE_MASK;
+  uint16_t seq_id = ((uint16_t)hdr->sequenceid[0] << 8) | hdr->sequenceid[1];
   uint16_t dst_port = (msg_type_nibble < 8) ? PTP_EVENT_PORT : PTP_GENERAL_PORT;
   int fd = (dst_port == PTP_EVENT_PORT) ? state->event_socket : state->general_socket;
   struct sockaddr_in dest;
@@ -354,6 +399,32 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   dest.sin_port        = htons(dst_port);
   dest.sin_addr.s_addr = inet_addr("224.0.1.129");
   int ret = sendto(fd, ptp_msg, ptp_msg_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+
+  if (ret > 0)
+    {
+      eth_mac_time_t tx_ts = {0};
+      if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_TX_TIME, &tx_ts) == ESP_OK)
+        {
+          struct timespec hw_ts = {
+            .tv_sec = (time_t)tx_ts.seconds,
+            .tv_nsec = (long)tx_ts.nanoseconds,
+          };
+          ptp_udp_ts_enqueue(state, true, dst_port, msg_type_nibble, seq_id, &hw_ts);
+          if (ts != NULL)
+            {
+              *ts = hw_ts;
+            }
+          ptpdbg("UDP TX ts queued: type=%s seq=%u port=%u ts=%lld.%09ld",
+                 ptp_msgtype_name(msg_type_nibble), seq_id, dst_port,
+                 (long long)hw_ts.tv_sec, hw_ts.tv_nsec);
+        }
+      else
+        {
+          ptpwarn("Failed to get UDP TX hw timestamp: type=%s seq=%u port=%u",
+                  ptp_msgtype_name(msg_type_nibble), seq_id, dst_port);
+        }
+    }
+
   return ret;
 #else
   /* IEEE 802.3 mode: build raw Ethernet frame and send via L2TAP */
@@ -403,6 +474,145 @@ static const char *ptp_msgtype_name(uint8_t type)
   }
 }
 
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+static int64_t ptp_timespec_delta_ms(const struct timespec *newer,
+                                     const struct timespec *older)
+{
+  int64_t sec = (int64_t)newer->tv_sec - (int64_t)older->tv_sec;
+  int64_t nsec = (int64_t)newer->tv_nsec - (int64_t)older->tv_nsec;
+  return sec * MSEC_PER_SEC + nsec / NSEC_PER_MSEC;
+}
+
+static int ptp_udp_port_to_index(uint16_t port)
+{
+  if (port == PTP_EVENT_PORT) {
+    return PTP_UDP_SOCKET_EVENT_IDX;
+  }
+  if (port == PTP_GENERAL_PORT) {
+    return PTP_UDP_SOCKET_GENERAL_IDX;
+  }
+  return -1;
+}
+
+static uint16_t ptp_udp_fd_to_port(const struct ptp_state_s *state, int fd)
+{
+  if (fd == state->event_socket) {
+    return PTP_EVENT_PORT;
+  }
+  if (fd == state->general_socket) {
+    return PTP_GENERAL_PORT;
+  }
+  return 0;
+}
+
+static void ptp_udp_ts_queue_remove_at(ptp_udp_ts_queue_t *queue, uint16_t offset)
+{
+  if (queue->count == 0 || offset >= queue->count) {
+    return;
+  }
+
+  for (uint16_t i = offset; i + 1 < queue->count; i++) {
+    uint16_t curr_idx = (uint16_t)((queue->head + i) % CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH);
+    uint16_t next_idx = (uint16_t)((queue->head + i + 1) % CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH);
+    queue->entries[curr_idx] = queue->entries[next_idx];
+  }
+  queue->count--;
+}
+
+static void ptp_udp_ts_queue_push(ptp_udp_ts_queue_t *queue,
+                                  uint8_t msg_type,
+                                  uint16_t sequence,
+                                  uint16_t port,
+                                  const struct timespec *timestamp)
+{
+  struct timespec now = {0};
+  clock_gettime(CLOCK_MONOTONIC, &now);
+
+  if (queue->count >= CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH) {
+    queue->head = (uint16_t)((queue->head + 1) % CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH);
+    queue->count--;
+    queue->dropped++;
+    ptpwarn("UDP ts queue full, dropping oldest entry (dropped=%lu)",
+            (unsigned long)queue->dropped);
+  }
+
+  uint16_t tail = (uint16_t)((queue->head + queue->count) % CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH);
+  queue->entries[tail].msg_type = (msg_type & PTP_MSGTYPE_MASK);
+  queue->entries[tail].sequence = sequence;
+  queue->entries[tail].port = port;
+  queue->entries[tail].timestamp = *timestamp;
+  queue->entries[tail].enqueue_time = now;
+  queue->count++;
+}
+
+static bool ptp_udp_ts_queue_pop_match(ptp_udp_ts_queue_t *queue,
+                                       uint8_t msg_type,
+                                       uint16_t sequence,
+                                       uint16_t port,
+                                       struct timespec *timestamp)
+{
+  struct timespec now = {0};
+  clock_gettime(CLOCK_MONOTONIC, &now);
+
+  while (queue->count > 0) {
+    const ptp_udp_ts_entry_t *entry = &queue->entries[queue->head];
+    if (ptp_timespec_delta_ms(&now, &entry->enqueue_time) <= CONFIG_NETUTILS_PTPD_UDP_TS_MATCH_TIMEOUT_MS) {
+      break;
+    }
+    ptpwarn("UDP ts queue timeout: type=%s seq=%u port=%u",
+            ptp_msgtype_name(entry->msg_type), entry->sequence, entry->port);
+    queue->head = (uint16_t)((queue->head + 1) % CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH);
+    queue->count--;
+  }
+
+  for (uint16_t i = 0; i < queue->count; i++) {
+    uint16_t idx = (uint16_t)((queue->head + i) % CONFIG_NETUTILS_PTPD_UDP_TS_QUEUE_DEPTH);
+    const ptp_udp_ts_entry_t *entry = &queue->entries[idx];
+    if (entry->msg_type == (msg_type & PTP_MSGTYPE_MASK) &&
+        entry->sequence == sequence &&
+        entry->port == port) {
+      *timestamp = entry->timestamp;
+      ptp_udp_ts_queue_remove_at(queue, i);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool ptp_udp_ts_dequeue_match(struct ptp_state_s *state,
+                                     bool tx_path,
+                                     uint16_t port,
+                                     uint8_t msg_type,
+                                     uint16_t sequence,
+                                     struct timespec *timestamp)
+{
+  int idx = ptp_udp_port_to_index(port);
+  if (idx < 0) {
+    return false;
+  }
+
+  ptp_udp_ts_queue_t *queue = tx_path ? &state->udp_tx_tsq[idx] : &state->udp_rx_tsq[idx];
+  return ptp_udp_ts_queue_pop_match(queue, msg_type, sequence, port, timestamp);
+}
+
+static void ptp_udp_ts_enqueue(struct ptp_state_s *state,
+                               bool tx_path,
+                               uint16_t port,
+                               uint8_t msg_type,
+                               uint16_t sequence,
+                               const struct timespec *timestamp)
+{
+  int idx = ptp_udp_port_to_index(port);
+  if (idx < 0) {
+    return;
+  }
+
+  ptp_udp_ts_queue_t *queue = tx_path ? &state->udp_tx_tsq[idx] : &state->udp_rx_tsq[idx];
+  ptp_udp_ts_queue_push(queue, msg_type, sequence, port, timestamp);
+}
+#endif
+
 #ifndef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
 /* ptp_net_recv — IEEE 802.3 mode only: read raw Ethernet frame via L2TAP with HW timestamp */
 static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
@@ -446,16 +656,42 @@ static int ptp_udp_recv_and_timestamp(FAR struct ptp_state_s *state, int fd,
                                        struct timespec *ts)
 {
   int ret = recvfrom(fd, ptp_msg, ptp_msg_len, MSG_DONTWAIT, NULL, NULL);
-  if (ret > 0 && ts != NULL) {
-    eth_mac_time_t rx_ts = {0};
-    if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK) {
-      ts->tv_sec  = (time_t)rx_ts.seconds;
-      ts->tv_nsec = (long)rx_ts.nanoseconds;
-      ESP_LOGD(TAG, "[UDP RX] hw ts: %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
-    } else {
-      clock_gettime(CLOCK_REALTIME, ts);  // fallback to software timestamp
+  if (ret > 0)
+    {
+      struct timespec rx_time = {0};
+      eth_mac_time_t rx_ts = {0};
+      if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_ts) == ESP_OK)
+        {
+          rx_time.tv_sec  = (time_t)rx_ts.seconds;
+          rx_time.tv_nsec = (long)rx_ts.nanoseconds;
+        }
+      else
+        {
+          clock_gettime(CLOCK_REALTIME, &rx_time);  // fallback to software timestamp
+        }
+
+      uint16_t rx_port = ptp_udp_fd_to_port(state, fd);
+      int queue_idx = ptp_udp_port_to_index(rx_port);
+      if (queue_idx >= 0)
+        {
+          state->udp_rx_fallback_ts[queue_idx] = rx_time;
+        }
+      if (ts != NULL)
+        {
+          *ts = rx_time;
+        }
+
+      if (ret >= (int)sizeof(struct ptp_header_s) && queue_idx >= 0)
+        {
+          struct ptp_header_s *hdr = (struct ptp_header_s *)ptp_msg;
+          uint8_t msg_type = hdr->messagetype & PTP_MSGTYPE_MASK;
+          uint16_t seq_id = ((uint16_t)hdr->sequenceid[0] << 8) | hdr->sequenceid[1];
+          ptp_udp_ts_enqueue(state, false, rx_port, msg_type, seq_id, &rx_time);
+          ptpdbg("UDP RX ts queued: type=%s seq=%u port=%u ts=%lld.%09ld",
+                 ptp_msgtype_name(msg_type), seq_id, rx_port,
+                 (long long)rx_time.tv_sec, rx_time.tv_nsec);
+        }
     }
-  }
   return ret;
 }
 #endif // CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
@@ -1299,6 +1535,19 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
    */
 
   ptp_gettime(state, &ts);
+#elif defined(CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4)
+  {
+    uint16_t sync_seq = ptp_get_sequence(&msg.header);
+    struct timespec tx_match = {0};
+    if (ptp_udp_ts_dequeue_match(state, true, PTP_EVENT_PORT, PTP_MSGTYPE_SYNC, sync_seq, &tx_match))
+      {
+        ts = tx_match;
+      }
+    else
+      {
+        ptpwarn("Missing queued TX timestamp for sync seq %u", sync_seq);
+      }
+  }
 #endif // !ESP_PTP
   timespec_to_ptp_format(&ts, msg.origintimestamp);
   msg.header.messagetype = PTP_MSGTYPE_FOLLOW_UP;
@@ -1355,16 +1604,21 @@ static int ptp_send_delay_req(FAR struct ptp_state_s *state)
 #ifdef ESP_PTP
   ret = ptp_net_send(state, &req, sizeof(req), &state->delayreq_time);
 #ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
-  /* UDP/IPv4 mode: replace software T1 with DM9058 hardware TX timestamp */
-  if (ret > 0) {
-    eth_mac_time_t tx_ts = {0};
-    if (esp_eth_ioctl(state->eth_handle, ETH_MAC_DM9058_CMD_G_PTP_TX_TIME, &tx_ts) == ESP_OK) {
-      state->delayreq_time.tv_sec  = (time_t)tx_ts.seconds;
-      state->delayreq_time.tv_nsec = (long)tx_ts.nanoseconds;
-      ptpdbg("Delay_Req T1 hw tx: %lld.%09ld\n",
-             (long long)state->delayreq_time.tv_sec, state->delayreq_time.tv_nsec);
+  if (ret > 0)
+    {
+      struct timespec tx_match = {0};
+      uint16_t seq = ptp_get_sequence(&req.header);
+      if (ptp_udp_ts_dequeue_match(state, true, PTP_EVENT_PORT, PTP_MSGTYPE_DELAY_REQ, seq, &tx_match))
+        {
+          state->delayreq_time = tx_match;
+          ptpdbg("Delay_Req T1 hw tx: %lld.%09ld\n",
+                 (long long)state->delayreq_time.tv_sec, state->delayreq_time.tv_nsec);
+        }
+      else
+        {
+          ptpwarn("Missing queued TX timestamp for delay-req seq %u", seq);
+        }
     }
-  }
 #endif // CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
 #else
   ret = sendto(state->tx_socket, &req, sizeof(req), 0,
@@ -2009,7 +2263,8 @@ static int ptp_process_delay_resp(FAR struct ptp_state_s *state,
 /* Determine received packet type and process it */
 
 static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
-                                 ssize_t length)
+                                 ssize_t length,
+                                 int rx_fd)
 {
   if (length < sizeof(struct ptp_header_s))
     {
@@ -2031,6 +2286,32 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
     {
       return OK;
     }
+
+#ifdef ESP_PTP
+#ifdef CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+  if (rx_fd >= 0)
+    {
+      uint16_t rx_port = ptp_udp_fd_to_port(state, rx_fd);
+      uint8_t msg_type = state->rxbuf.header.messagetype & PTP_MSGTYPE_MASK;
+      uint16_t seq = ptp_get_sequence(&state->rxbuf.header);
+      struct timespec matched_ts = {0};
+      if (ptp_udp_ts_dequeue_match(state, false, rx_port, msg_type, seq, &matched_ts))
+        {
+          state->rxtime = matched_ts;
+        }
+      else
+        {
+          int queue_idx = ptp_udp_port_to_index(rx_port);
+          if (queue_idx >= 0)
+            {
+              state->rxtime = state->udp_rx_fallback_ts[queue_idx];
+            }
+          ptpwarn("Missing queued RX timestamp for type=%s seq=%u port=%u",
+                  ptp_msgtype_name(msg_type), seq, rx_port);
+        }
+    }
+#endif // CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
+#endif // ESP_PTP
 
   clock_gettime(CLOCK_MONOTONIC, &state->last_received_multicast);
 
@@ -2276,7 +2557,7 @@ static int ptp_daemon(int argc, FAR char** argv)
                                            &state->rxbuf, sizeof(state->rxbuf),
                                            &state->rxtime);
           if (ret > 0) {
-            ptp_process_rx_packet(state, ret);
+            ptp_process_rx_packet(state, ret, pollfds[_i].fd);
           }
         }
       }
@@ -2288,7 +2569,7 @@ static int ptp_daemon(int argc, FAR char** argv)
           ret = ptp_net_recv(state, &state->rxbuf, sizeof(state->rxbuf), &state->rxtime);
           if (ret > 0)
             {
-              ptp_process_rx_packet(state, ret);
+              ptp_process_rx_packet(state, ret, -1);
             }
         }
 #endif // CONFIG_EXAMPLE_PTP_TRANSPORT_UDP_IPV4
@@ -2306,7 +2587,7 @@ static int ptp_daemon(int argc, FAR char** argv)
           if (ret > 0)
             {
               ptp_getrxtime(state, &rxhdr, &state->rxtime);
-              ptp_process_rx_packet(state, ret);
+              ptp_process_rx_packet(state, ret, -1);
             }
         }
 
@@ -2318,7 +2599,7 @@ static int ptp_daemon(int argc, FAR char** argv)
                     MSG_DONTWAIT);
           if (ret > 0)
             {
-              ptp_process_rx_packet(state, ret);
+              ptp_process_rx_packet(state, ret, -1);
             }
         }
 

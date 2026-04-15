@@ -8,7 +8,11 @@
 
 This example demonstrates the use of Precision Time Protocol (PTP) for time synchronization over Ethernet in ESP-IDF. PTP allows precise time synchronization between different nodes in a network. The example initializes Ethernet, starts a PTP daemon (based on a [Nuttx implementation](https://github.com/apache/nuttx-apps/tree/master/netutils/ptpd) ported to ESP-IDF), and showcases synchronization accuracy by toggling a GPIO pin.
 
-The PTP protocol is transported over **Ethernet at Layer 2 (L2)**, following the guidelines set forth in Annex F of the IEEE 1588-2008 standard (also known as PTPv2). The **timestamps for synchronization are provided by internal Ethernet MAC (EMAC)** and are attached to Ethernet frames at the hardware level. These hardware-generated timestamps are then passed to the software via the **L2 TAP interface**, allowing precise clock synchronization with minimal latency.
+The example supports two PTP transport modes:
+- **IEEE 802.3 (L2TAP)**: PTP over raw Ethernet (EtherType `0x88F7`), timestamps returned via L2TAP info records.
+- **UDP/IPv4**: PTP over UDP multicast (`224.0.1.129`, ports `319/320`), timestamps returned via per-socket RX/TX timestamp queues in `ptpd`.
+
+In both modes, synchronization timestamps come from Ethernet MAC hardware timestamping, preserving hardware-level precision.
 
 The example is designed to run at least with two ESP32P4 boards, where one acts as **the master** and the other as **the slave**. Both devices will begin toggling a GPIO pin once they are synchronized. By measuring alignment of the rising edges of the GPIO pulse on both devices using an oscilloscope, you can observe the synchronization precision. The pulse width and toggle frequency can be configured using ``CONFIG_EXAMPLE_PTP_PULSE_WIDTH_NS``.
 
@@ -56,6 +60,7 @@ idf.py menuconfig
 ```
 and configure the following parameters:
 
+* **PTP transport type**: Select `IEEE 802.3` or `UDP IPv4`.
 * **PTP Pulse GPIO Pin**: Set the GPIO pin number for pulse toggling.
 * **Pulse Width (ns)**: Set the pulse width (in nanoseconds).
 * **PTP Daemon Configuration**: Select either Master or Slave and configure all the associated parameters per your application needs. To achieve more precise synchronization, enable ``PTP Client delay requests``.
