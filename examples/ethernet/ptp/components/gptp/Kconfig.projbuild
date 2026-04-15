@@ -1,0 +1,108 @@
+menu "gPTP (IEEE 802.1AS) Configuration"
+
+    config GPTP_ENABLE
+        bool "Enable gPTP (IEEE 802.1AS) daemon"
+        default n
+        help
+            Build and start a gPTP (IEEE 802.1AS) daemon using L2 Ethernet transport.
+            gPTP uses P2P (peer-to-peer) delay mechanism and multicast MAC 01:80:C2:00:00:0E.
+            Can run alongside the standard ptpd daemon.
+
+    if GPTP_ENABLE
+
+        config GPTP_SLAVE_ONLY
+            bool "gPTP slave only (never become master)"
+            default n
+            help
+                When enabled, this node will never compete to become gPTP master.
+                It will always operate as a slave synchronized to the best master clock.
+
+        config GPTP_PRIORITY1
+            int "gPTP priority1 (BMCA main priority)"
+            default 128
+            range 0 255
+            help
+                Main clock priority used in Best Master Clock Algorithm.
+                Lower value = higher priority. Set lower than peers to become master.
+
+        config GPTP_PRIORITY2
+            int "gPTP priority2 (BMCA sub-priority)"
+            default 128
+            range 0 255
+            help
+                Secondary clock priority used when priority1, class and accuracy are equal.
+                Lower value = higher priority.
+
+        config GPTP_CLOCK_CLASS
+            int "gPTP clock class"
+            default 248
+            range 0 255
+            help
+                Clock class announced in gPTP Announce messages.
+                Lower value means higher quality clock source (e.g. 6=GPS, 135=from GPS).
+                248 = default (unknown quality).
+
+        config GPTP_CLOCK_ACCURACY
+            int "gPTP clock accuracy"
+            default 254
+            range 0 255
+            help
+                Clock accuracy code (IEEE 1588 Table 6).
+                254 = unknown accuracy.
+
+        config GPTP_CLOCK_SOURCE
+            int "gPTP clock source type"
+            default 160
+            range 0 255
+            help
+                Clock source type code (IEEE 1588 Table 9).
+                160 = internal oscillator, 80 = NTP, 32 = GPS.
+
+        config GPTP_DOMAIN
+            int "gPTP domain number"
+            default 0
+            range 0 127
+            help
+                PTP domain number. All gPTP nodes must share the same domain.
+
+        config GPTP_TASK_STACK_SIZE
+            int "gPTP daemon task stack size (bytes)"
+            default 8192
+            help
+                Stack size for the gPTP daemon FreeRTOS task.
+
+        config GPTP_TASK_PRIORITY
+            int "gPTP daemon task priority"
+            default 10
+            help
+                FreeRTOS task priority for the gPTP daemon.
+                Higher value = higher priority. Should be above network stack but
+                below time-critical interrupt handlers.
+
+        config GPTP_TWO_STEP
+            bool "gPTP two-step mode"
+            default y
+            help
+                When enabled, Sync and PDelayResp are sent with a follow-up message
+                containing the precise hardware TX timestamp.
+                Required when using DM9058 (which captures TX timestamp after transmission).
+                Must match ETH_DM9058_PTP_TWO_STEP_MODE setting.
+
+        config GPTP_SETTIME_THRESHOLD_MS
+            int "gPTP step-clock threshold (ms)"
+            default 1000
+            help
+                If the offset from master exceeds this threshold, perform a clock step
+                (settime) instead of smooth frequency adjustment (adjtime).
+                Set to 0 to always use smooth adjustment.
+
+        config GPTP_LOG_ENABLE
+            bool "Enable gPTP logging"
+            default y
+            help
+                Enable ESP_LOGx logging from the gPTP daemon.
+                Disable to reduce code size and CPU usage.
+
+    endif # GPTP_ENABLE
+
+endmenu # gPTP Configuration

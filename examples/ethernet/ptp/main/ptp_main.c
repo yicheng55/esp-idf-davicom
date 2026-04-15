@@ -14,8 +14,11 @@
 #include "driver/gpio.h"
 #include "freertos/event_groups.h"
 #include "ptpd.h"
-
 #include "esp_eth_time.h"
+
+#ifdef CONFIG_GPTP_ENABLE
+#include "gptp.h"
+#endif
 
 static const char *TAG = "ptp_example";
 
@@ -166,6 +169,16 @@ void app_main(void)
     esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
 
     int pid = ptpd_start("ETH_0");
+
+#ifdef CONFIG_GPTP_ENABLE
+    gptp_handle_t gptp_handle = NULL;
+    esp_err_t gptp_err = gptp_start("ETH_0", &gptp_handle);
+    if (gptp_err != ESP_OK) {
+        ESP_LOGE(TAG, "gptp_start failed: %s", esp_err_to_name(gptp_err));
+    } else {
+        ESP_LOGI(TAG, "gPTP daemon started");
+    }
+#endif
 
     struct timespec cur_time = {0, 0};
     // wait for the clock to be available
