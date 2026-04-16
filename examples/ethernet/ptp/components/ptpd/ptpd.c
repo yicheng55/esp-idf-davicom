@@ -358,12 +358,17 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 static const char *ptp_msgtype_name(uint8_t type)
 {
   switch (type & PTP_MSGTYPE_MASK) {
-    case PTP_MSGTYPE_SYNC:       return "Sync";
-    case PTP_MSGTYPE_DELAY_REQ:  return "Delay_Req";
-    case PTP_MSGTYPE_FOLLOW_UP:  return "Follow_Up";
-    case PTP_MSGTYPE_DELAY_RESP: return "Delay_Resp";
-    case PTP_MSGTYPE_ANNOUNCE:   return "Announce";
-    default:                     return "Unknown";
+    case PTP_MSGTYPE_SYNC:            return "Sync";
+    case PTP_MSGTYPE_DELAY_REQ:       return "Delay_Req";
+    case PTP_MSGTYPE_PDELAY_REQ:      return "Pdelay_Req";
+    case PTP_MSGTYPE_PDELAY_RESP:     return "Pdelay_Resp";
+    case PTP_MSGTYPE_FOLLOW_UP:       return "Follow_Up";
+    case PTP_MSGTYPE_DELAY_RESP:      return "Delay_Resp";
+    case PTP_MSGTYPE_PDELAY_RESP_FUP: return "Pdelay_Resp_Follow_Up";
+    case PTP_MSGTYPE_ANNOUNCE:        return "Announce";
+    case PTP_MSGTYPE_SIGNALING:       return "Signaling";
+    case PTP_MSGTYPE_MANAGEMENT:      return "Management";
+    default:                          return "Unknown";
   }
 }
 
@@ -1878,8 +1883,20 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
       return ptp_process_delay_req(state, &state->rxbuf.delay_req);
 #endif
 
+    /* P2P / gPTP messages — not handled by this E2E implementation */
+    case PTP_MSGTYPE_PDELAY_REQ:
+    case PTP_MSGTYPE_PDELAY_RESP:
+    case PTP_MSGTYPE_PDELAY_RESP_FUP:
+      return OK;
+
+    /* General messages we silently ignore */
+    case PTP_MSGTYPE_SIGNALING:
+    case PTP_MSGTYPE_MANAGEMENT:
+      return OK;
+
     default:
-      ptpinfo("Ignoring unknown PTP packet type: 0x%02x\n",
+      ptpinfo("Ignoring unknown PTP packet type: 0x%02x (raw byte: 0x%02x)\n",
+              state->rxbuf.header.messagetype & PTP_MSGTYPE_MASK,
               state->rxbuf.header.messagetype);
       return OK;
   }

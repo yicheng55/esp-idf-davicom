@@ -52,12 +52,17 @@
 
 /* Message types */
 
-#define PTP_MSGTYPE_MASK       0x0F
-#define PTP_MSGTYPE_SYNC          0
-#define PTP_MSGTYPE_DELAY_REQ     1
-#define PTP_MSGTYPE_FOLLOW_UP     8
-#define PTP_MSGTYPE_DELAY_RESP    9
-#define PTP_MSGTYPE_ANNOUNCE     11
+#define PTP_MSGTYPE_MASK             0x0F
+#define PTP_MSGTYPE_SYNC              0
+#define PTP_MSGTYPE_DELAY_REQ         1
+#define PTP_MSGTYPE_PDELAY_REQ        2   /* Peer delay request  (gPTP / P2P) */
+#define PTP_MSGTYPE_PDELAY_RESP       3   /* Peer delay response (gPTP / P2P) */
+#define PTP_MSGTYPE_FOLLOW_UP         8
+#define PTP_MSGTYPE_DELAY_RESP        9
+#define PTP_MSGTYPE_PDELAY_RESP_FUP  10   /* Peer delay response follow-up   */
+#define PTP_MSGTYPE_ANNOUNCE         11
+#define PTP_MSGTYPE_SIGNALING        12
+#define PTP_MSGTYPE_MANAGEMENT       13
 
 /* Message flags */
 
