@@ -1,0 +1,118 @@
+menu "gPTP (IEEE 802.1AS) Configuration"
+
+    config GPTP_ENABLED
+        bool "Enable gPTP daemon"
+        default n
+        help
+            Enable the IEEE 802.1AS (gPTP) generalized Precision Time Protocol
+            daemon. Uses L2TAP raw Ethernet transport and the esp_eth PTP
+            hardware clock HAL.
+
+    if GPTP_ENABLED
+
+    config GPTP_IFACE_NAME
+        string "Ethernet interface name"
+        default "ETH_DEF"
+        help
+            Name of the Ethernet interface to bind the gPTP daemon to.
+            Corresponds to the L2TAP interface device name set via
+            L2TAP_S_INTF_DEVICE ioctl.
+
+    config GPTP_DOMAIN_NUMBER
+        int "PTP domain number"
+        default 0
+        range 0 127
+        help
+            IEEE 1588 domain number. Must match on all nodes in the same
+            802.1AS domain. gPTP typically uses domain 0.
+
+    config GPTP_PRIORITY1
+        int "Priority1 (BMCA)"
+        default 128
+        range 0 255
+        help
+            Priority1 field used by the Best Master Clock Algorithm (BMCA).
+            Lower values are preferred. A grandmaster should be given a value
+            lower than the default 128 (e.g. 50).
+
+    config GPTP_PRIORITY2
+        int "Priority2 (BMCA tie-breaker)"
+        default 128
+        range 0 255
+        help
+            Priority2 is the secondary tie-breaker after priority1, clockClass
+            and clockAccuracy. Lower values are preferred.
+
+    config GPTP_CLOCK_CLASS
+        int "Clock class"
+        default 248
+        range 0 255
+        help
+            Clock class for the local clock.
+              135 = primary reference clock (GPS-locked, etc.)
+              248 = default (no external reference / slave-capable)
+              255 = slave-only
+
+    config GPTP_SLAVE_ONLY
+        bool "Slave-only mode"
+        default n
+        help
+            When enabled, this node will never become a grandmaster. It will
+            always synchronise to an external master. Equivalent to setting
+            clock class 255 and priority1=255.
+
+    config GPTP_TWO_STEP
+        bool "Two-step clock mode"
+        default n
+        help
+            Enable two-step operation: the precise TX timestamp is carried in
+            a FollowUp / PDelayRespFollowUp message rather than embedded in the
+            original event message. Required when the hardware cannot insert the
+            timestamp into the frame on-the-fly. Disable for one-step operation
+            (802.1AS default).
+
+    config GPTP_SYNC_INTERVAL
+        int "Sync interval (log2 seconds)"
+        default -3
+        range -7 0
+        help
+            log2 of the Sync message interval in seconds.
+              -3 = 125 ms  (802.1AS default)
+              -2 = 250 ms
+              -1 = 500 ms
+               0 = 1 s
+
+    config GPTP_ANNOUNCE_INTERVAL
+        int "Announce interval (log2 seconds)"
+        default 0
+        range -3 4
+        help
+            log2 of the Announce message interval in seconds.
+              0 = 1 s  (802.1AS default)
+
+    config GPTP_TASK_STACK_SIZE
+        int "Task stack size (bytes)"
+        default 8192
+        range 4096 32768
+        help
+            FreeRTOS stack size for the gPTP daemon task.
+
+    config GPTP_TASK_PRIORITY
+        int "Task priority"
+        default 10
+        range 1 24
+        help
+            FreeRTOS task priority for the gPTP daemon. Should be higher than
+            the application task but lower than time-critical ISR-deferred tasks.
+
+    config GPTP_LOG_VERBOSE
+        bool "Enable verbose (DEBUG/VERBOSE) logging"
+        default n
+        help
+            When enabled, DBGV / DBGVV macros emit ESP_LOGV / ESP_LOGD output.
+            Very noisy – only useful when debugging the state machine or
+            message timing.
+
+    endif # GPTP_ENABLED
+
+endmenu
