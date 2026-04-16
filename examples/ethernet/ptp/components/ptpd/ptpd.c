@@ -1880,7 +1880,7 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
 
     default:
       ptpinfo("Ignoring unknown PTP packet type: 0x%02x\n",
-              state->rxbuf.header.messagetype);
+              state->rxbuf.header.messagetype & PTP_MSGTYPE_MASK);
       return OK;
   }
 }
