@@ -335,9 +335,15 @@ void msgPackPDelayRespFollowUp(Octet *buf, const MsgHeader *header,
     buf[32] = CTRL_OTHER;
     buf[33] = 0x7F;
 
-    /* Propagate correctionField from PDelayReq header */
-    *(Integer32 *)(buf +  8) = flip32((Integer32)(header->correctionfield >> 32));
-    *(Integer32 *)(buf + 12) = flip32((Integer32)(header->correctionfield));
+    /*
+     * correctionField SHALL be 0 per IEEE 802.1AS-2020 §11.4.4.3 and
+     * IEEE 1588-2019 §11.4.4c.  The peer-delay formula at the requester is:
+     *   peerDelay = ((T4-T1) - (T3-T2) - CF_resp - CF_respFU) / 2
+     * For a two-step responder, CF_resp=0 and CF_respFU=0; the values T2 and T3
+     * are carried explicitly in the message bodies, so there is nothing to encode
+     * in the correctionField.
+     */
+    memset(buf + 8, 0, 8);
 
     *(UInteger16 *)(buf + 34) = flip16(responseOriginTimestamp->secondsField.msb);
     *(UInteger32 *)(buf + 36) = flip32(responseOriginTimestamp->secondsField.lsb);

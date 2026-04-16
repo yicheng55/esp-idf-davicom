@@ -660,14 +660,48 @@ static void handlePDelayReq(PtpClock *ptpClock, TimeInternal *time, Boolean isFr
     case PTP_MASTER:
         if (isFromSelf) break;
 
+        /* Track incoming seqId so we can match any later FollowUp we send */
+        ptpClock->recvPDelayReqSequenceId = ptpClock->msgTmpHeader.sequenceId;
+        DBGV("handlePDelayReq: seqId=%u from %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x port %u",
+             ptpClock->recvPDelayReqSequenceId,
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[0],
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[1],
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[2],
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[3],
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[4],
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[5],
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[6],
+             (uint8_t)ptpClock->msgTmpHeader.sourcePortIdentity.clockIdentity[7],
+             ptpClock->msgTmpHeader.sourcePortIdentity.portNumber);
+
         /* Save T2 (requestReceiptTimestamp) */
         ptpClock->pdelay_t2 = *time;
 
-        issuePDelayResp(ptpClock, time, &ptpClock->msgTmpHeader);
+        /*
+         * issuePDelayResp packs T2 into the message body, sends it, then
+         * overwrites *time with the actual TX timestamp T3 (if HW available).
+         * We use a separate flag to guard the FollowUp send because T3.seconds
+         * could legitimately be 0 at midnight.
+         */
+        {
+            TimeInternal t3_before = *time;
+            issuePDelayResp(ptpClock, time, &ptpClock->msgTmpHeader);
+            /* HW TX timestamp arrived when *time changed from t3_before */
+            Boolean t3_valid = (time->seconds != t3_before.seconds ||
+                                time->nanoseconds != t3_before.nanoseconds);
 
-        /* TWO_STEP: send FollowUp with T3 */
-        if (time->seconds != 0 && ptpClock->defaultDS.twoStepFlag)
-            issuePDelayRespFollowUp(ptpClock, time, &ptpClock->msgTmpHeader);
+            if (ptpClock->defaultDS.twoStepFlag) {
+                if (t3_valid) {
+                    DBG("handlePDelayReq: TWO_STEP T2=%ds %dns T3=%ds %dns seqId=%u",
+                        ptpClock->pdelay_t2.seconds, ptpClock->pdelay_t2.nanoseconds,
+                        time->seconds, time->nanoseconds,
+                        ptpClock->recvPDelayReqSequenceId);
+                    issuePDelayRespFollowUp(ptpClock, time, &ptpClock->msgTmpHeader);
+                } else {
+                    ERROR("handlePDelayReq: TWO_STEP but no TX timestamp for T3 – FollowUp skipped");
+                }
+            }
+        }
         break;
 
     default:
@@ -707,23 +741,45 @@ static void handlePDelayResp(PtpClock *ptpClock, TimeInternal *time, Boolean isF
         if ((ptpClock->sentPDelayReqSequenceId - 1) == ptpClock->msgTmpHeader.sequenceId
             && isCurrentRequest) {
             if (getFlag(ptpClock->msgTmpHeader.flagField[0], FLAG0_TWO_STEP)) {
-                /* TWO_STEP: save T4 + T2, wait for FollowUp */
+                /*
+                 * TWO_STEP PDelay_Resp:
+                 *   body  → T2 (requestReceiptTimestamp at responder)
+                 *   T4    → our RX timestamp of this PDelay_Resp
+                 *   correctionField → 0 per IEEE 802.1AS-2020 §11.4.3
+                 * We save these and wait for PDelay_Resp_Follow_Up which carries T3.
+                 */
                 ptpClock->waitingForPDelayRespFollowUp = TRUE;
-                ptpClock->pdelay_t4 = *time;
+                ptpClock->pdelay_t4 = *time;                  /* T4: our RX time */
                 toInternalTime(&requestReceiptTimestamp,
                                &ptpClock->msgTmp.presp.requestReceiptTimestamp);
-                ptpClock->pdelay_t2 = requestReceiptTimestamp;
-                scaledNanosecondsToInternalTime(&ptpClock->msgTmpHeader.correctionfield, &correctionField);
+                ptpClock->pdelay_t2 = requestReceiptTimestamp; /* T2: responder RX time */
+                scaledNanosecondsToInternalTime(&ptpClock->msgTmpHeader.correctionfield,
+                                               &correctionField);
                 ptpClock->correctionField_pDelayResp = correctionField;
+                DBG("handlePDelayResp: TWO_STEP seqId=%u T4=%ds %dns T2=%ds %dns",
+                    ptpClock->msgTmpHeader.sequenceId,
+                    ptpClock->pdelay_t4.seconds, ptpClock->pdelay_t4.nanoseconds,
+                    ptpClock->pdelay_t2.seconds, ptpClock->pdelay_t2.nanoseconds);
             } else {
-                /* ONE_STEP: correctionField = (T3 - T2), compute delay directly */
+                /*
+                 * ONE_STEP PDelay_Resp:
+                 *   correctionField = (T3 - T2) in scaledNanoseconds
+                 * peerDelay = (T4 - T1 - correctionField) / 2
+                 */
                 ptpClock->waitingForPDelayRespFollowUp = FALSE;
                 ptpClock->pdelay_t4 = *time;
-                scaledNanosecondsToInternalTime(&ptpClock->msgTmpHeader.correctionfield, &correctionField);
+                scaledNanosecondsToInternalTime(&ptpClock->msgTmpHeader.correctionfield,
+                                               &correctionField);
+                DBG("handlePDelayResp: ONE_STEP seqId=%u T4=%ds %dns CF=%ds %dns",
+                    ptpClock->msgTmpHeader.sequenceId,
+                    ptpClock->pdelay_t4.seconds, ptpClock->pdelay_t4.nanoseconds,
+                    correctionField.seconds, correctionField.nanoseconds);
                 updatePeerDelay(ptpClock, &correctionField, FALSE);
             }
         } else {
-            DBGV("handlePDelayResp: seqId mismatch or wrong requester");
+            DBGV("handlePDelayResp: seqId mismatch (got %u, expected %u) or wrong requester",
+                 ptpClock->msgTmpHeader.sequenceId,
+                 (uint16_t)(ptpClock->sentPDelayReqSequenceId - 1));
         }
         break;
 
@@ -754,16 +810,55 @@ static void handlePDelayRespFollowUp(PtpClock *ptpClock, Boolean isFromSelf)
     case PTP_PASSIVE:
     case PTP_SLAVE:
     case PTP_MASTER:
-        if (!ptpClock->waitingForPDelayRespFollowUp) break;
-        if (ptpClock->msgTmpHeader.sequenceId != ptpClock->sentPDelayReqSequenceId - 1) break;
+        if (isFromSelf) break;
+        if (!ptpClock->waitingForPDelayRespFollowUp) {
+            DBGV("handlePDelayRespFollowUp: not waiting for FollowUp, ignore");
+            break;
+        }
+        if (ptpClock->msgTmpHeader.sequenceId != (uint16_t)(ptpClock->sentPDelayReqSequenceId - 1)) {
+            DBGV("handlePDelayRespFollowUp: seqId mismatch (got %u, expected %u), ignore",
+                 ptpClock->msgTmpHeader.sequenceId,
+                 (uint16_t)(ptpClock->sentPDelayReqSequenceId - 1));
+            break;
+        }
 
         msgUnpackPDelayRespFollowUp(ptpClock->msgIbuf, &ptpClock->msgTmp.prespfollow);
+
+        /*
+         * Verify requestingPortIdentity == our own port identity.
+         * Per IEEE 802.1AS-2020 §11.4.4.2 and IEEE 1588-2019 §11.4.4c,
+         * a PDelay_Resp_Follow_Up is valid only when addressed to the
+         * port that originally sent the PDelay_Req.
+         */
+        if (!isSamePortIdentity(&ptpClock->portDS.portIdentity,
+                                &ptpClock->msgTmp.prespfollow.requestingPortIdentity)) {
+            DBGV("handlePDelayRespFollowUp: requestingPortIdentity mismatch, ignore");
+            break;
+        }
+
         toInternalTime(&responseOriginTimestamp,
                        &ptpClock->msgTmp.prespfollow.responseOriginTimestamp);
-        ptpClock->pdelay_t3 = responseOriginTimestamp;
+        ptpClock->pdelay_t3 = responseOriginTimestamp; /* T3: responder TX time */
 
+        /*
+         * correctionField in PDelay_Resp_Follow_Up SHALL be 0 per spec.
+         * Add it to saved correctionField from PDelay_Resp (also 0 normally)
+         * so that any future extension carrying non-zero values still works.
+         *
+         * Final formula in updatePeerDelay (twoStep=TRUE):
+         *   peerDelay = ((T2-T1) + (T4-T3) - totalCF) / 2
+         *             = ((T4-T1) - (T3-T2) - totalCF) / 2
+         */
         scaledNanosecondsToInternalTime(&ptpClock->msgTmpHeader.correctionfield, &correctionField);
         addTime(&correctionField, &correctionField, &ptpClock->correctionField_pDelayResp);
+
+        DBG("handlePDelayRespFollowUp: seqId=%u T1=%ds %dns T2=%ds %dns T3=%ds %dns T4=%ds %dns",
+            ptpClock->msgTmpHeader.sequenceId,
+            ptpClock->pdelay_t1.seconds, ptpClock->pdelay_t1.nanoseconds,
+            ptpClock->pdelay_t2.seconds, ptpClock->pdelay_t2.nanoseconds,
+            ptpClock->pdelay_t3.seconds, ptpClock->pdelay_t3.nanoseconds,
+            ptpClock->pdelay_t4.seconds, ptpClock->pdelay_t4.nanoseconds);
+
         updatePeerDelay(ptpClock, &correctionField, TRUE);
         ptpClock->waitingForPDelayRespFollowUp = FALSE;
         break;
