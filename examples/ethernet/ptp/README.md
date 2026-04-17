@@ -12,6 +12,8 @@ The PTP protocol is transported over **Ethernet at Layer 2 (L2)**, following the
 
 The example is designed to run at least with two ESP32P4 boards, where one acts as **the master** and the other as **the slave**. Both devices will begin toggling a GPIO pin once they are synchronized. By measuring alignment of the rising edges of the GPIO pulse on both devices using an oscilloscope, you can observe the synchronization precision. The pulse width and toggle frequency can be configured using ``CONFIG_EXAMPLE_PTP_PULSE_WIDTH_NS``.
 
+P2P/Peer Delay implementation notes for the current ESP-IDF example are documented in [docs/L2TAP_PTPD_P2P_Manual.md](docs/L2TAP_PTPD_P2P_Manual.md).
+
 ## How to use example
 
 ### Hardware Required

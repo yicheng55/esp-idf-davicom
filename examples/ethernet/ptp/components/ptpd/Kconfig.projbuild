@@ -175,6 +175,28 @@ menu "PTP Daemon Configuration"
                     If no packets are being received from currently chosen clock source,
                     fall back to next best clock source after this many seconds.
 
+                choice NETUTILS_PTPD_DELAY_MECHANISM
+                    prompt "PTP client path delay mechanism"
+                    default NETUTILS_PTPD_MECHANISM_E2E
+                    help
+                        Select how the client estimates link delay.
+
+                    config NETUTILS_PTPD_MECHANISM_E2E
+                        bool "End-to-End (Delay_Req / Delay_Resp)"
+                        help
+                            Uses Delay_Req and Delay_Resp messages to estimate the end-to-end
+                            delay to the selected master clock.
+
+                    config NETUTILS_PTPD_MECHANISM_P2P
+                        bool "Peer-to-Peer (Pdelay_Req / Pdelay_Resp)"
+                        depends on NETUTILS_PTPD_SERVER && NETUTILS_PTPD_TWOSTEP_SYNC
+                        help
+                            Uses Peer Delay messages to estimate the direct link delay to the
+                            adjacent peer. Current ESP-IDF implementation supports only the
+                            two-step P2P flow and expects client + server to be enabled.
+
+                endchoice
+
             config NETUTILS_PTPD_SETTIME_THRESHOLD_MS
                 int "PTP client threshold for changing system time (ms)"
                 default 1000
@@ -205,35 +227,40 @@ menu "PTP Daemon Configuration"
 
             config NETUTILS_PTPD_SEND_DELAYREQ
                 bool "PTP client enable delay requests"
+                depends on NETUTILS_PTPD_MECHANISM_E2E
                 default n
                 help
                     If enabled, sends delay request messages to measure the network delay
                     to server. If disabled, assumes zero delay.
 
-            if NETUTILS_PTPD_SEND_DELAYREQ
+            config NETUTILS_PTPD_MAX_PATH_DELAY_NS
+                int "PTP client maximum path/peer delay (ns)"
+                default 100000
+                range 1 1000000000
+                help
+                    Measured path delay longer than this is ignored. Delay or peer-delay
+                    requests are also not transmitted until clock synchronization is better
+                    than this.
 
-                config NETUTILS_PTPD_MAX_PATH_DELAY_NS
-                    int "PTP client maximum path delay (ns)"
-                    default 100000
-                    range 1 1000000000
-                    help
-                        Measured path delay longer than this is ignored. Delay requests are
-                        also not transmitted until clock synchronization is better than this.
+            config NETUTILS_PTPD_DELAYREQ_AVGCOUNT
+                int "PTP client path/peer delay averaging count"
+                default 100
+                help
+                    Measured path delay is averaged over this many samples.
 
-                config NETUTILS_PTPD_DELAYREQ_AVGCOUNT
-                    int "PTP client path delay averaging count"
-                    default 100
-                    help
-                        Measured path delay is averaged over this many samples.
+            config NETUTILS_PTPD_PATH_DELAY_STABILITY_NS
+                int "PTP client path delay stability gate (ns)"
+                default 250
+                help
+                    Sends path or peer delay requests only once the internal clock is stable
+                    and skews only in the defined interval.
 
-                config NETUTILS_PTPD_PATH_DELAY_STABILITY_NS
-                    int "PTP client send delay request when clock stability (ns)"
-                    default 250
-                    help
-                        Sends path delay request only once the internal clock is stable and skews only
-                        in defined interval.
-
-            endif # NETUTILS_PTPD_SEND_DELAYREQ
+            config NETUTILS_PTPD_PDELAY_INTERVAL_MSEC
+                int "PTP client peer delay request interval (ms)"
+                depends on NETUTILS_PTPD_MECHANISM_P2P
+                default 1000
+                help
+                    How often to transmit Pdelay_Req while operating in peer-to-peer mode.
 
         endif # NETUTILS_PTPD_CLIENT
 

@@ -55,8 +55,11 @@
 #define PTP_MSGTYPE_MASK       0x0F
 #define PTP_MSGTYPE_SYNC          0
 #define PTP_MSGTYPE_DELAY_REQ     1
+#define PTP_MSGTYPE_PDELAY_REQ    2
+#define PTP_MSGTYPE_PDELAY_RESP   3
 #define PTP_MSGTYPE_FOLLOW_UP     8
 #define PTP_MSGTYPE_DELAY_RESP    9
+#define PTP_MSGTYPE_PDELAY_RESP_FOLLOW_UP 10
 #define PTP_MSGTYPE_ANNOUNCE     11
 
 /* Message flags */
@@ -130,12 +133,41 @@ struct ptp_delay_req_s
   uint8_t origintimestamp[10];
 };
 
+/* PdelayReq: request peer delay measurement */
+
+struct ptp_pdelay_req_s
+{
+  struct ptp_header_s header;
+  uint8_t origintimestamp[10];
+  uint8_t reserved[10];
+};
+
 /* DelayResp: response to DelayReq */
 
 struct ptp_delay_resp_s
 {
   struct ptp_header_s header;
   uint8_t receivetimestamp[10];
+  uint8_t reqidentity[8];
+  uint8_t reqportindex[2];
+};
+
+/* PdelayResp: response to PdelayReq */
+
+struct ptp_pdelay_resp_s
+{
+  struct ptp_header_s header;
+  uint8_t receivetimestamp[10];
+  uint8_t reqidentity[8];
+  uint8_t reqportindex[2];
+};
+
+/* PdelayRespFollowUp: actual transmit timestamp of PdelayResp */
+
+struct ptp_pdelay_resp_follow_up_s
+{
+  struct ptp_header_s header;
+  uint8_t origintimestamp[10];
   uint8_t reqidentity[8];
   uint8_t reqportindex[2];
 };
