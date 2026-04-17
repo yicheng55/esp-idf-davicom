@@ -423,12 +423,34 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
 
   int ret = read(state->ptp_socket, &ptp_msg_ext_buff, 0);
 
-  // check if read was successful, ts exists and ts_info is valid
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
-  {
-    *ts = *(struct timespec *)ts_info->data;
-    // ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type), (long long)ts->tv_sec, ts->tv_nsec);
-  }
+  // Use the L2TAP timestamp when present; otherwise fall back to the
+  // current PTP clock to avoid leaving callers with a zero timestamp.
+  if (ret > 0 && ts)
+    {
+      bool has_l2tap_ts = ts_info->type == L2TAP_IREC_TIME_STAMP &&
+                          ts_info->len >= L2TAP_IREC_LEN(sizeof(struct timespec));
+      struct timespec rx_ts = {0};
+
+      if (has_l2tap_ts)
+        {
+          rx_ts = *(struct timespec *)ts_info->data;
+          has_l2tap_ts = rx_ts.tv_sec > 0 || rx_ts.tv_nsec > 0;
+        }
+
+      if (has_l2tap_ts)
+        {
+          *ts = rx_ts;
+        }
+      else
+        {
+#ifdef ESP_PTP
+          esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, ts);
+#else
+          clock_gettime(CLOCK_REALTIME, ts);
+#endif
+          ptpdbg("RX packet missing valid L2TAP timestamp, falling back to current PTP clock");
+        }
+    }
 
   memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
 
@@ -2091,6 +2113,13 @@ static int ptp_process_pdelay_resp_follow_up(FAR struct ptp_state_s *state,
   tab_ns = timespec_delta_ns(&state->pdelay_t2, &state->pdelay_t1);
   tba_ns = timespec_delta_ns(&state->pdelay_t4, &state->pdelay_t3);
   path_delay = (tab_ns + tba_ns - state->pdelay_resp_correction_ns) / 2;
+
+  ESP_LOGW(TAG, "Pdelay T1=%lld.%09ld T2=%lld.%09ld T3=%lld.%09ld T4=%lld.%09ld tab=%lld tba=%lld path=%lld ns",
+           (long long)state->pdelay_t1.tv_sec, state->pdelay_t1.tv_nsec,
+           (long long)state->pdelay_t2.tv_sec, state->pdelay_t2.tv_nsec,
+           (long long)state->pdelay_t3.tv_sec, state->pdelay_t3.tv_nsec,
+           (long long)state->pdelay_t4.tv_sec, state->pdelay_t4.tv_nsec,
+           tab_ns, tba_ns, path_delay);
 
   state->waiting_pdelay_follow_up = false;
   ptp_update_path_delay_estimate(state, path_delay, "Peer delay");
