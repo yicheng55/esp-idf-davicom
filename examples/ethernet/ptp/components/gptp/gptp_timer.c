@@ -57,6 +57,9 @@ void timerStop(UInteger16 index, IntervalTimer *itimer)
 void timerStart(UInteger16 index, UInteger32 interval_ms, IntervalTimer *itimer)
 {
     if (index >= TIMER_ARRAY_SIZE) return;
+    /* Clamp to minimum 1 ms – a 0-ms interval would set interval=0 and
+     * timerUpdate() would skip the entry, permanently stopping the timer. */
+    if (interval_ms == 0) interval_ms = 10;
     itimer[index].expire   = FALSE;
     itimer[index].left     = (Integer32)interval_ms;
     itimer[index].interval = (Integer32)interval_ms;

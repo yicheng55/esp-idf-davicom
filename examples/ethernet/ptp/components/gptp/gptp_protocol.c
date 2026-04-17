@@ -34,6 +34,7 @@ static void handlePDelayRespFollowUp(PtpClock *, Boolean);
 static void handleManagement(PtpClock *, Boolean);
 static void handleSignaling(PtpClock *, Boolean);
 
+static UInteger32 pdelayRandInterval(Integer8 logInterval);
 static void issueDelayReqTimerExpired(PtpClock *);
 static void issueAnnounce(PtpClock *);
 static void issueSync(PtpClock *);
@@ -117,7 +118,7 @@ void toState(PtpClock *ptpClock, UInteger8 state)
                    ptpClock->itimer);
         /* 802.1AS: continue PDelay measurement even in LISTENING */
         timerStart(PDELAYREQ_INTERVAL_TIMER,
-                   safeGetRand((UInteger32)pow2ms(ptpClock->portDS.logMinPdelayReqInterval + 1)),
+                   pdelayRandInterval(ptpClock->portDS.logMinPdelayReqInterval),
                    ptpClock->itimer);
         ptpClock->portDS.portState = PTP_LISTENING;
         ptpClock->recommendedState = PTP_LISTENING;
@@ -138,7 +139,7 @@ void toState(PtpClock *ptpClock, UInteger8 state)
                    ptpClock->itimer);
         /* P2P: PDelay runs in MASTER too */
         timerStart(PDELAYREQ_INTERVAL_TIMER,
-                   safeGetRand((UInteger32)pow2ms(ptpClock->portDS.logMinPdelayReqInterval + 1)),
+                   pdelayRandInterval(ptpClock->portDS.logMinPdelayReqInterval),
                    ptpClock->itimer);
         ptpClock->portDS.portState = PTP_MASTER;
         break;
@@ -150,7 +151,7 @@ void toState(PtpClock *ptpClock, UInteger8 state)
                    (UInteger32)pow2ms(ptpClock->portDS.logAnnounceInterval),
                    ptpClock->itimer);
         timerStart(PDELAYREQ_INTERVAL_TIMER,
-                   safeGetRand((UInteger32)pow2ms(ptpClock->portDS.logMinPdelayReqInterval + 1)),
+                   pdelayRandInterval(ptpClock->portDS.logMinPdelayReqInterval),
                    ptpClock->itimer);
         ptpClock->portDS.portState = PTP_PASSIVE;
         break;
@@ -162,7 +163,7 @@ void toState(PtpClock *ptpClock, UInteger8 state)
                    (UInteger32)pow2ms(ptpClock->portDS.logAnnounceInterval),
                    ptpClock->itimer);
         timerStart(PDELAYREQ_INTERVAL_TIMER,
-                   safeGetRand((UInteger32)pow2ms(ptpClock->portDS.logMinPdelayReqInterval + 1)),
+                   pdelayRandInterval(ptpClock->portDS.logMinPdelayReqInterval),
                    ptpClock->itimer);
         ptpClock->portDS.portState = PTP_UNCALIBRATED;
         break;
@@ -882,13 +883,26 @@ static void handleSignaling(PtpClock *ptpClock, Boolean isFromSelf)
  *  Issue functions: build and transmit PTP messages
  * ============================================================ */
 
+/* Return a randomised PDelay interval in [nominal/2 .. 3*nominal/2].
+ * Using pure safeGetRand(2*nominal) can yield 0 which would stop the timer.
+ * 802.1AS-2020 §11.5.2.2 says the interval shall be in [mean/2 .. 3*mean/2]. */
+static UInteger32 pdelayRandInterval(Integer8 logInterval)
+{
+    UInteger32 nominal = (UInteger32)pow2ms(logInterval); /* e.g. 250 ms for logInt=-2 */
+    if (nominal == 0) nominal = 1;
+    /* [nominal/2 .. 3*nominal/2]  →  base = nominal/2, jitter in [0..nominal) */
+    UInteger32 base = nominal / 2;
+    UInteger32 jitter = (nominal > 0) ? (UInteger32)(rand() % (int)nominal) : 0;
+    return base + jitter;
+}
+
 static void issueDelayReqTimerExpired(PtpClock *ptpClock)
 {
     /* In 802.1AS (P2P), PDelay runs in all active states */
     if (ptpClock->portDS.delayMechanism == P2P) {
         if (timerExpired(PDELAYREQ_INTERVAL_TIMER, ptpClock->itimer)) {
             timerStart(PDELAYREQ_INTERVAL_TIMER,
-                       safeGetRand((UInteger32)pow2ms(ptpClock->portDS.logMinPdelayReqInterval + 1)),
+                       pdelayRandInterval(ptpClock->portDS.logMinPdelayReqInterval),
                        ptpClock->itimer);
             DBGV("PDELAYREQ_INTERVAL_TIMEOUT");
             issuePDelayReq(ptpClock);
@@ -981,6 +995,19 @@ static void issuePDelayReq(PtpClock *ptpClock)
 {
     Timestamp    originTimestamp;
     TimeInternal internalTime = {0, 0};
+
+    /* Warn if a previous PDelay_Req never received a response.
+     * sentPDelayReqSequenceId is incremented after each send, so if it has
+     * advanced since the last time we got a PDelay_Resp (tracked via
+     * waitingForPDelayRespFollowUp still being TRUE from the prior cycle),
+     * the peer does not support P2P delay – likely a standard E2E PTP master. */
+    if (ptpClock->waitingForPDelayRespFollowUp) {
+        ESP_LOGW(GPTP_TAG,
+                 "issuePDelayReq: no PDelay_Resp received for seqId=%u "
+                 "– peer may not support gPTP P2P delay (E2E master?)",
+                 (unsigned)(ptpClock->sentPDelayReqSequenceId - 1));
+        ptpClock->waitingForPDelayRespFollowUp = FALSE;
+    }
 
     if (DEFAULT_TWO_STEP_FLAG) getTime(&internalTime);
     fromInternalTime(&internalTime, &originTimestamp);
