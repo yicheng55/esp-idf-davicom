@@ -1423,7 +1423,11 @@ static int ptp_periodic_send(FAR struct ptp_state_s *state)
 #endif /* CONFIG_NETUTILS_PTPD_SERVER */
 
 #ifdef CONFIG_NETUTILS_PTPD_MECHANISM_P2P
-  if (state->selected_source_valid && state->can_send_delayreq)
+  /* Send Pdelay_Req regardless of role (IEEE 1588 §11.4.2):
+   * - Slave: only after offset is stable (can_send_delayreq)
+   * - Master: always, to measure the link delay symmetrically
+   */
+  if (!state->selected_source_valid || state->can_send_delayreq)
     {
       struct timespec time_now;
       struct timespec delta;
@@ -2009,16 +2013,18 @@ static int ptp_process_pdelay_req(FAR struct ptp_state_s *state,
 static int ptp_process_pdelay_resp(FAR struct ptp_state_s *state,
                                    FAR struct ptp_pdelay_resp_s *msg)
 {
-  if (!state->selected_source_valid)
+  /* Response must be addressed to us */
+  if (!ptp_port_identity_matches(msg->reqidentity, msg->reqportindex,
+                                 &state->own_identity.header))
     {
       return OK;
     }
 
-  if (memcmp(msg->header.sourceidentity,
+  /* When slave: also confirm the responder is our selected master */
+  if (state->selected_source_valid &&
+      memcmp(msg->header.sourceidentity,
              state->selected_source.header.sourceidentity,
-             sizeof(msg->header.sourceidentity)) != 0 ||
-      !ptp_port_identity_matches(msg->reqidentity, msg->reqportindex,
-                                 &state->own_identity.header))
+             sizeof(msg->header.sourceidentity)) != 0)
     {
       return OK;
     }
@@ -2051,17 +2057,23 @@ static int ptp_process_pdelay_resp_follow_up(FAR struct ptp_state_s *state,
   int64_t tba_ns;
   int64_t path_delay;
 
-  if (!state->waiting_pdelay_follow_up ||
-      !state->selected_source_valid)
+  if (!state->waiting_pdelay_follow_up)
     {
       return OK;
     }
 
-  if (memcmp(msg->header.sourceidentity,
-             state->selected_source.header.sourceidentity,
-             sizeof(msg->header.sourceidentity)) != 0 ||
-      !ptp_port_identity_matches(msg->reqidentity, msg->reqportindex,
+  /* Follow-up must be addressed to us */
+  if (!ptp_port_identity_matches(msg->reqidentity, msg->reqportindex,
                                  &state->own_identity.header))
+    {
+      return OK;
+    }
+
+  /* When slave: also confirm the responder is our selected master */
+  if (state->selected_source_valid &&
+      memcmp(msg->header.sourceidentity,
+             state->selected_source.header.sourceidentity,
+             sizeof(msg->header.sourceidentity)) != 0)
     {
       return OK;
     }
