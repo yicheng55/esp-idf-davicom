@@ -43,6 +43,20 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
+/* Port state values for ptpd_status_s.port_state */
+
+#define PTPD_PORT_STATE_INITIALIZING 0
+#define PTPD_PORT_STATE_LISTENING    1
+#define PTPD_PORT_STATE_MASTER       2
+#define PTPD_PORT_STATE_SLAVE        3
+#define PTPD_PORT_STATE_PASSIVE      4
+#define PTPD_PORT_STATE_FAULT        5
+
+/* Delay mechanism values for ptpd_status_s.delay_mechanism */
+
+#define PTPD_DELAY_MECHANISM_E2E     0
+#define PTPD_DELAY_MECHANISM_P2P     1
+
 /****************************************************************************
  * Public Types
  ****************************************************************************/
@@ -89,9 +103,25 @@ struct ptpd_status_s
 
   long drift_ppb;
 
-  /* Averaged path delay */
+  /* Averaged path delay (E2E mode) */
 
   long path_delay_ns;
+
+  /* Averaged peer delay (P2P / gPTP mode). Zero when using E2E. */
+
+  long peer_delay_ns;
+
+  /* Active delay mechanism at build time */
+
+  int delay_mechanism; /* PTPD_DELAY_MECHANISM_E2E or PTPD_DELAY_MECHANISM_P2P */
+
+  /* Current port state */
+
+  int port_state; /* PTPD_PORT_STATE_* */
+
+  /* Latest offset from master computed at last Sync (nanoseconds) */
+
+  int64_t offset_from_master_ns;
 
   /* Timestamps of latest received packets (CLOCK_MONOTONIC) */
 
@@ -105,6 +135,7 @@ struct ptpd_status_s
   struct timespec last_transmitted_announce;
   struct timespec last_transmitted_delayresp;
   struct timespec last_transmitted_delayreq;
+  struct timespec last_transmitted_pdelay_req; /* P2P mode only */
 };
 
 /****************************************************************************

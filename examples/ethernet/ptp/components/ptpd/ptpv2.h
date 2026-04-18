@@ -59,6 +59,16 @@
 #define PTP_MSGTYPE_DELAY_RESP    9
 #define PTP_MSGTYPE_ANNOUNCE     11
 
+/* P2P peer-delay message types (IEEE 802.1AS mandatory) */
+
+#define PTP_MSGTYPE_PDELAY_REQ            2
+#define PTP_MSGTYPE_PDELAY_RESP           3
+#define PTP_MSGTYPE_PDELAY_RESP_FOLLOW_UP 10
+
+/* gPTP profile: transportSpecific = 0x1 in high nibble of messagetype byte */
+
+#define PTP_TRANSPORT_SPECIFIC_GPTP       0x10
+
 /* Message flags */
 
 #define PTP_FLAGS0_TWOSTEP        (1 << 1)
@@ -138,6 +148,35 @@ struct ptp_delay_resp_s
   uint8_t receivetimestamp[10];
   uint8_t reqidentity[8];
   uint8_t reqportindex[2];
+};
+
+/* PdelayReq: peer delay measurement request (P2P, IEEE 802.1AS) */
+
+struct ptp_pdelay_req_s
+{
+  struct ptp_header_s header;
+  uint8_t origintimestamp[10]; /* set to 0 per 802.1AS clause 11.4.3 */
+  uint8_t reserved[10];
+};
+
+/* PdelayResp: carries t2 (time Pdelay_Req was received at responder) */
+
+struct ptp_pdelay_resp_s
+{
+  struct ptp_header_s header;
+  uint8_t requestreceipttimestamp[10]; /* t2: Pdelay_Req RX time at responder */
+  uint8_t requestingportidentity[8];
+  uint8_t requestingportindex[2];
+};
+
+/* PdelayRespFollowUp: carries t3 (actual TX timestamp of Pdelay_Resp) */
+
+struct ptp_pdelay_resp_follow_up_s
+{
+  struct ptp_header_s header;
+  uint8_t responseorigintimestamp[10]; /* t3: actual Pdelay_Resp TX time */
+  uint8_t requestingportidentity[8];
+  uint8_t requestingportindex[2];
 };
 
 #endif /* __APPS_NETUTILS_PTPD_PTPV2_H */

@@ -31,7 +31,7 @@ int esp_eth_clock_adjtime(clockid_t clk_id, esp_eth_clock_adj_param_t *adj)
     switch (clk_id) {
     case CLOCK_PTP_SYSTEM:
         if (adj->mode == ETH_CLK_ADJ_FREQ_SCALE) {
-            esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_ESP_CMD_ADJ_PTP_FREQ, &adj->freq_scale);
+            esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ, &adj->freq_scale);
             if (ret != ESP_OK) {
                 errno = esp_eth_clock_esp_err_to_errno(ret);
                 return -1;
@@ -57,7 +57,7 @@ int esp_eth_clock_settime(clockid_t clock_id, const struct timespec *tp)
                 .seconds = tp->tv_sec,
                 .nanoseconds = tp->tv_nsec
             };
-            esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_ESP_CMD_S_PTP_TIME, &ptp_time);
+            esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_DM9058_CMD_S_PTP_TIME, &ptp_time);
             if (ret != ESP_OK) {
                 errno = esp_eth_clock_esp_err_to_errno(ret);
                 return -1;
@@ -82,7 +82,7 @@ int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp)
         if (s_eth_hndl) {
             eth_mac_time_t ptp_time;
             // ESP_LOGI(TAG, "gettime s_eth_hndl: %p", (void *)s_eth_hndl);
-            esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_ESP_CMD_G_PTP_TIME, &ptp_time);
+            esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_DM9058_CMD_G_PTP_TIME, &ptp_time);
             if (ret != ESP_OK) {
                 errno = esp_eth_clock_esp_err_to_errno(ret);
                 return -1;
@@ -110,7 +110,7 @@ esp_err_t esp_eth_clock_get_rx_time(esp_eth_handle_t eth_handle, struct timespec
 
     eth_mac_time_t ptp_rx_time;
     // ESP_LOGI(TAG, "get_rx_time eth_handle: %p", eth_handle);
-    esp_err_t ret = esp_eth_ioctl(eth_handle, ETH_MAC_ESP_CMD_G_PTP_RX_TIME, &ptp_rx_time);
+    esp_err_t ret = esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &ptp_rx_time);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -125,7 +125,7 @@ int esp_eth_clock_set_target_time(clockid_t clock_id, struct timespec *tp)
         .seconds = tp->tv_sec,
         .nanoseconds = tp->tv_nsec
     };
-    esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_ESP_CMD_S_TARGET_TIME, &mac_target_time);
+    esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_DM9058_CMD_S_TARGET_TIME, &mac_target_time);
     if (ret != ESP_OK) {
         errno = esp_eth_clock_esp_err_to_errno(ret);
         return -1;
@@ -136,7 +136,7 @@ int esp_eth_clock_set_target_time(clockid_t clock_id, struct timespec *tp)
 int esp_eth_clock_register_target_cb(clockid_t clock_id,
                                      ts_target_exceed_cb_from_isr_t ts_callback)
 {
-    esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_ESP_CMD_S_TARGET_CB, ts_callback);
+    esp_err_t ret = esp_eth_ioctl(s_eth_hndl, ETH_MAC_DM9058_CMD_S_TARGET_CB, ts_callback);
     if (ret != ESP_OK) {
         errno = esp_eth_clock_esp_err_to_errno(ret);
         return -1;
@@ -154,7 +154,7 @@ esp_err_t esp_eth_clock_init(clockid_t clock_id, esp_eth_clock_cfg_t *cfg)
             .transport = cfg->transport,
         };
         ESP_LOGI(TAG, "clock_init cfg->eth_hndl: %p", (void *)cfg->eth_hndl);
-        if (esp_eth_ioctl(cfg->eth_hndl, ETH_MAC_ESP_CMD_PTP_ENABLE, &ptp_cfg) != ESP_OK) {
+        if (esp_eth_ioctl(cfg->eth_hndl, ETH_MAC_DM9058_CMD_PTP_ENABLE, &ptp_cfg) != ESP_OK) {
             return ESP_FAIL;
         }
         s_eth_hndl = cfg->eth_hndl;

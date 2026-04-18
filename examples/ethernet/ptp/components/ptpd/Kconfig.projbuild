@@ -18,6 +18,16 @@ menu "PTP Daemon Configuration"
 
     if NETUTILS_PTPD
 
+        config NETUTILS_PTPD_GPTP_PROFILE
+            bool "Enable full 802.1AS gPTP profile"
+            default n
+            help
+                When enabled, all PTP messages (Sync, Announce, Follow_Up, Pdelay_*)
+                are sent to the 802.1AS multicast MAC 01:80:C2:00:00:0E and the
+                transportSpecific field is set to 0x1 (gPTP SdoId).
+                When disabled, only Pdelay messages use the gPTP MAC; Sync/Announce
+                continue to use 01:1B:19:00:00:00 for backward compatibility.
+
         config NETUTILS_PTPD_DEBUG
             bool "Enable PTP debug messages"
             default n
@@ -168,6 +178,50 @@ menu "PTP Daemon Configuration"
 
         if NETUTILS_PTPD_CLIENT
 
+            choice NETUTILS_PTPD_DELAY_MECHANISM
+                prompt "PTP delay measurement mechanism"
+                default NETUTILS_PTPD_MECHANISM_P2P
+                help
+                    Select the delay measurement method. P2P (Peer-to-Peer) is
+                    mandatory for IEEE 802.1AS (gPTP). E2E uses the original
+                    Delay_Req / Delay_Resp mechanism from IEEE 1588.
+
+            config NETUTILS_PTPD_MECHANISM_E2E
+                bool "E2E (End-to-End, IEEE 1588 Delay_Req/Resp)"
+                help
+                    Use Delay_Req / Delay_Resp for path delay measurement.
+
+            config NETUTILS_PTPD_MECHANISM_P2P
+                bool "P2P (Peer-to-Peer, required by IEEE 802.1AS gPTP)"
+                help
+                    Use Pdelay_Req / Pdelay_Resp / Pdelay_Resp_Follow_Up for
+                    peer link delay measurement. Mandatory for 802.1AS compliance.
+
+            endchoice
+
+            config NETUTILS_PTPD_PDELAY_INTERVAL_MSEC
+                int "gPTP Pdelay request interval (ms)"
+                default 250
+                depends on NETUTILS_PTPD_MECHANISM_P2P
+                help
+                    Interval between Pdelay_Req transmissions in milliseconds.
+                    IEEE 802.1AS default is 250 ms (logPdelayReqInterval = -2).
+
+            config NETUTILS_PTPD_PDELAY_AVGCOUNT
+                int "Peer delay averaging count"
+                default 16
+                depends on NETUTILS_PTPD_MECHANISM_P2P
+                help
+                    Number of peer delay samples to average. Range 8-32 recommended.
+
+            config NETUTILS_PTPD_MAX_PEER_DELAY_NS
+                int "Maximum acceptable peer delay (ns)"
+                default 100000
+                depends on NETUTILS_PTPD_MECHANISM_P2P
+                help
+                    Peer delay samples outside this range are discarded as outliers.
+                    100 us is appropriate for a local switched Ethernet segment.
+
             config NETUTILS_PTPD_TIMEOUT_MS
                 int "PTP client timeout for changing clock source (ms)"
                 default 60000
@@ -204,11 +258,13 @@ menu "PTP Daemon Configuration"
         #        changes (such as caused by temperature changes).
 
             config NETUTILS_PTPD_SEND_DELAYREQ
-                bool "PTP client enable delay requests"
+                bool "PTP client enable delay requests (E2E)"
                 default n
+                depends on NETUTILS_PTPD_MECHANISM_E2E
                 help
                     If enabled, sends delay request messages to measure the network delay
                     to server. If disabled, assumes zero delay.
+                    Only applies to E2E mode; P2P mode uses Pdelay automatically.
 
             if NETUTILS_PTPD_SEND_DELAYREQ
 
