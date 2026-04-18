@@ -1574,6 +1574,17 @@ static int ptp_periodic_send(FAR struct ptp_state_s *state)
       (!state->selected_source_valid &&
        state->port_state != PTPD_PORT_STATE_SLAVE))
     {
+        /* Keep the state machine aligned with fallback server behavior.
+         * Without this, a node can stay in LISTENING while still emitting
+         * Sync/Announce, which suppresses Pdelay_Req because that path only
+         * runs in MASTER or SLAVE.
+         */
+        if (!state->selected_source_valid &&
+            state->port_state == PTPD_PORT_STATE_LISTENING)
+          {
+            ptp_set_port_state(state, PTPD_PORT_STATE_MASTER);
+          }
+
       struct timespec time_now;
       struct timespec delta;
 
@@ -1621,6 +1632,27 @@ static int ptp_periodic_send(FAR struct ptp_state_s *state)
   if (state->port_state == PTPD_PORT_STATE_SLAVE ||
       state->port_state == PTPD_PORT_STATE_MASTER)
     {
+      /* Timeout recovery: if Pdelay_Resp_FUP never arrives (e.g. peer uses
+       * one-step or the packet was lost), pdelay_waiting_fup stays true
+       * forever and we never send another Pdelay_Req.  Reset after 3x the
+       * nominal interval so a single lost packet does not stall permanently.
+       */
+      if (state->pdelay_waiting_fup)
+        {
+          struct timespec time_now;
+          struct timespec delta;
+
+          clock_gettime(CLOCK_MONOTONIC, &time_now);
+          clock_timespec_subtract(&time_now,
+                                  &state->last_transmitted_pdelay_req, &delta);
+
+          if (timespec_to_ms(&delta) >= CONFIG_NETUTILS_PTPD_PDELAY_INTERVAL_MSEC * 3)
+            {
+              ptpwarn("Pdelay_Resp_FUP timeout, resetting pdelay state\n");
+              state->pdelay_waiting_fup = false;
+            }
+        }
+
       if (!state->pdelay_waiting_fup)
         {
           struct timespec time_now;
