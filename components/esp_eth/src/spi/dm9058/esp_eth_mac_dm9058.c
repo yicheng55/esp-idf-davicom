@@ -1403,15 +1403,15 @@ static void esp32_DM9058_task(void *arg)
                                 pkt_info_ret == ESP_OK &&
                                 info.is_ptp &&
                                 (info.message_type == ESP_ETH_PTP_DM9058_MSG_SYNC ||
-                                 info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ)) {
+                                 info.message_type == ESP_ETH_PTP_DM9058_MSG_DELAY_REQ ||
+                                 info.message_type == ESP_ETH_PTP_DM9058_MSG_PDELAY_REQ ||
+                                 info.message_type == ESP_ETH_PTP_DM9058_MSG_PDELAY_RESP)) {
                                 rx_info = &rx_ts;
                                 ESP_LOGD(TAG, "forward rx ts to stack: %lu.%09lu", rx_ts.seconds, rx_ts.nanoseconds);
                             } else if (rx_ts_valid &&
                                        pkt_info_ret == ESP_OK &&
-                                       info.is_ptp &&
-                                       info.message_type != ESP_ETH_PTP_DM9058_MSG_SYNC &&
-                                       info.message_type != ESP_ETH_PTP_DM9058_MSG_DELAY_REQ) {
-                                ESP_LOGD(TAG, "timestamp filtered out (non sync/delay_req), msg_type=0x%02x", info.message_type);
+                                       info.is_ptp) {
+                                ESP_LOGD(TAG, "timestamp filtered out (msg_type=0x%02x)", info.message_type);
                             }
                             /* pass the buffer and optional rx info to stack */
                             emac->eth->stack_input_info(emac->eth, buffer, buf_len, rx_info);
