@@ -351,6 +351,28 @@ static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, 
   memcpy(eth_frame + sizeof(eth_hdr), ptp_msg, ptp_msg_len);
 }
 
+static bool ptp_timespec_is_valid(FAR const struct timespec *ts)
+{
+  return ts != NULL && ts->tv_sec >= 0 && ts->tv_nsec >= 0 && ts->tv_nsec < NSEC_PER_SEC;
+}
+
+static bool ptp_try_get_hw_rxtime(FAR struct ptp_state_s *state,
+                                  FAR struct timespec *ts)
+{
+#ifdef ESP_PTP
+  if (esp_eth_clock_get_rx_time(state->eth_handle, ts) == ESP_OK &&
+      ptp_timespec_is_valid(ts))
+    {
+      return true;
+    }
+#else
+  UNUSED(state);
+  UNUSED(ts);
+#endif
+
+  return false;
+}
+
 static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
@@ -377,9 +399,34 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   int ret = write(state->ptp_socket, &ptp_msg_ext_buff, 0);
 
   // check if write was successful, ts exists and ts_info is valid
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
+  if (ret > 0 && ts)
     {
-      *ts = *(struct timespec *)ts_info->data;
+      bool has_l2tap_ts = ts_info->type == L2TAP_IREC_TIME_STAMP &&
+                          ts_info->len >= L2TAP_IREC_LEN(sizeof(struct timespec));
+
+      if (has_l2tap_ts)
+        {
+          struct timespec tx_ts = *(struct timespec *)ts_info->data;
+
+          if (ptp_timespec_is_valid(&tx_ts))
+            {
+              *ts = tx_ts;
+            }
+          else
+            {
+              has_l2tap_ts = false;
+            }
+        }
+
+      if (!has_l2tap_ts)
+        {
+#ifdef ESP_PTP
+          esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, ts);
+#else
+          clock_gettime(CLOCK_REALTIME, ts);
+#endif
+          ptpdbg("TX packet missing valid L2TAP timestamp, falling back to current PTP clock");
+        }
     }
 
   return ret;
@@ -403,6 +450,7 @@ static const char *ptp_msgtype_name(uint8_t type)
 static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t ptp_msg_len, struct timespec *ts)
 {
   uint8_t eth_frame[ptp_msg_len + ETH_HEADER_LEN];
+  size_t payload_len;
 
   // wrap "Info Records Buffer" into union to ensure proper alignment of data (this is typically needed when
   // accessing double word variables or structs containing double word variables)
@@ -434,7 +482,7 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
       if (has_l2tap_ts)
         {
           rx_ts = *(struct timespec *)ts_info->data;
-          has_l2tap_ts = rx_ts.tv_sec > 0 || rx_ts.tv_nsec > 0;
+          has_l2tap_ts = ptp_timespec_is_valid(&rx_ts);
         }
 
       if (has_l2tap_ts)
@@ -444,17 +492,35 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
       else
         {
 #ifdef ESP_PTP
-          esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, ts);
+          if (!ptp_try_get_hw_rxtime(state, ts))
+            {
+              esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, ts);
+              ptpdbg("RX packet missing valid L2TAP timestamp, falling back to current PTP clock");
+            }
+          else
+            {
+              ptpdbg("RX packet missing valid L2TAP timestamp, using hardware RX timestamp fallback");
+            }
 #else
           clock_gettime(CLOCK_REALTIME, ts);
 #endif
-          ptpdbg("RX packet missing valid L2TAP timestamp, falling back to current PTP clock");
         }
     }
 
-  memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
+  if (ret <= ETH_HEADER_LEN)
+    {
+      return 0;
+    }
 
-  return ret;
+  payload_len = (size_t)ret - ETH_HEADER_LEN;
+  if (payload_len > ptp_msg_len)
+    {
+      payload_len = ptp_msg_len;
+    }
+
+  memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], payload_len);
+
+  return (int)payload_len;
 }
 
 static int64_t timespec_to_ns(FAR const struct timespec *ts)
@@ -2060,6 +2126,17 @@ static int ptp_process_pdelay_resp(FAR struct ptp_state_s *state,
 
   state->pdelay_t4 = state->rxtime;
   ptp_format_to_timespec(msg->receivetimestamp, &state->pdelay_t2);
+
+  if (!ptp_timespec_is_valid(&state->pdelay_t4) ||
+      !ptp_timespec_is_valid(&state->pdelay_t2))
+    {
+      ptpwarn("Ignoring pdelay resp with invalid timestamps T2=%lld.%09ld T4=%lld.%09ld\n",
+              (long long)state->pdelay_t2.tv_sec, state->pdelay_t2.tv_nsec,
+              (long long)state->pdelay_t4.tv_sec, state->pdelay_t4.tv_nsec);
+      state->waiting_pdelay_follow_up = false;
+      return OK;
+    }
+
   state->pdelay_resp_correction_ns = ptp_correction_to_ns(msg->header.correction);
 
   if (msg->header.flags[0] & PTP_FLAGS0_TWOSTEP)
@@ -2108,6 +2185,21 @@ static int ptp_process_pdelay_resp_follow_up(FAR struct ptp_state_s *state,
     }
 
   ptp_format_to_timespec(msg->origintimestamp, &state->pdelay_t3);
+
+  if (!ptp_timespec_is_valid(&state->pdelay_t1) ||
+      !ptp_timespec_is_valid(&state->pdelay_t2) ||
+      !ptp_timespec_is_valid(&state->pdelay_t3) ||
+      !ptp_timespec_is_valid(&state->pdelay_t4))
+    {
+      ptpwarn("Ignoring pdelay follow-up with invalid timestamps T1=%lld.%09ld T2=%lld.%09ld T3=%lld.%09ld T4=%lld.%09ld\n",
+              (long long)state->pdelay_t1.tv_sec, state->pdelay_t1.tv_nsec,
+              (long long)state->pdelay_t2.tv_sec, state->pdelay_t2.tv_nsec,
+              (long long)state->pdelay_t3.tv_sec, state->pdelay_t3.tv_nsec,
+              (long long)state->pdelay_t4.tv_sec, state->pdelay_t4.tv_nsec);
+      state->waiting_pdelay_follow_up = false;
+      return OK;
+    }
+
   state->pdelay_resp_correction_ns += ptp_correction_to_ns(msg->header.correction);
 
   tab_ns = timespec_delta_ns(&state->pdelay_t2, &state->pdelay_t1);
