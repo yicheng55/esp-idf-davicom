@@ -1343,7 +1343,7 @@ static int ptp_send_pdelay_req(FAR struct ptp_state_s *state)
   if (ret > 0)
     {
       clock_gettime(CLOCK_MONOTONIC, &state->last_transmitted_pdelay_req);
-      state->pdelay_waiting_fup = false;
+      state->pdelay_waiting_fup = true;
       ptpinfo("Sent pdelay_req, seq %d\n", (int)state->pdelay_req_seq);
     }
   else
