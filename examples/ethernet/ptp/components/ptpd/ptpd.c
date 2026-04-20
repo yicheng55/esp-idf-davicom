@@ -1530,7 +1530,15 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   // ptpinfo("remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
   // ptpinfo("offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
   ptpdbg("remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
-  ESP_LOGW(TAG, "offset_ns %+9lli, adj %+6li, drift_acc %+7li, path_delay %5ld ns\n", offset_ns, adj, state->offset_pi.drift_acc, state->path_delay_ns);
+  {
+    /* Show whichever delay term is actually in use: peer delay (P2P/802.1AS)
+     * or the classic E2E path_delay_ns. */
+    long display_delay_ns = (long)(state->peer_mean_path_delay_valid
+                                   ? state->peer_mean_path_delay_ns
+                                   : state->path_delay_ns);
+    ESP_LOGW(TAG, "offset_ns %+9lli, adj %+6li, drift_acc %+7li, path_delay %5ld ns\n",
+             offset_ns, adj, state->offset_pi.drift_acc, display_delay_ns);
+  }
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),
   // we would get incorrect delay.
