@@ -118,6 +118,12 @@
 #define CONFIG_NETUTILS_PTPD_PATH_DELAY_STABILITY_NS 0
 #endif
 
+static bool ptp_timespec_is_valid(FAR const struct timespec *ts)
+{
+  return ts != NULL && ts->tv_sec >= 0 &&
+         ts->tv_nsec >= 0 && ts->tv_nsec < NSEC_PER_SEC;
+}
+
 #define clock_timespec_subtract(ts1, ts2, ts3) timespecsub(ts1, ts2, ts3)
 #define clock_timespec_add(ts1, ts2, ts3) timespecadd(ts1, ts2, ts3)
 
@@ -353,8 +359,26 @@ static void ptp_create_eth_frame(struct ptp_state_s *state, uint8_t *eth_frame, 
   };
 
 #if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
-  /* gPTP: every message uses 01:80:C2:00:00:0E */
-  const uint8_t dest[ETH_ADDR_LEN] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E};
+  /* gPTP: Sync/Follow_Up/Announce use the forwardable PTPv2 MAC (01:1B:19:00:00:00);
+   * PDelay messages use the link-local gPTP MAC (01:80:C2:00:00:0E).
+   */
+  struct ptp_header_s *hdr = (struct ptp_header_s *)ptp_msg;
+  uint8_t mt = (ptp_msg_len >= sizeof(*hdr))
+               ? (uint8_t)(hdr->messagetype & PTP_MSGTYPE_MASK) : 0;
+  bool is_sync_or_followup = (mt == PTP_MSGTYPE_SYNC ||
+                               mt == PTP_MSGTYPE_FOLLOW_UP ||
+                               mt == PTP_MSGTYPE_ANNOUNCE);
+  uint8_t dest[ETH_ADDR_LEN];
+  if (is_sync_or_followup)
+    {
+      dest[0] = 0x01; dest[1] = 0x1B; dest[2] = 0x19;
+      dest[3] = 0x00; dest[4] = 0x00; dest[5] = 0x00;
+    }
+  else
+    {
+      dest[0] = 0x01; dest[1] = 0x80; dest[2] = 0xC2;
+      dest[3] = 0x00; dest[4] = 0x00; dest[5] = 0x0E;
+    }
 #else
   /* 1588 default: peer-delay messages use the P2P MAC, everything else the
    * forwardable PTPv2 MAC (ptp4l sends everything at this addr).
@@ -396,6 +420,8 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
       l2tap_irec_hdr_t align;
   } u;
 
+  memset(&u, 0, sizeof(u));
+
   l2tap_extended_buff_t ptp_msg_ext_buff;
 
   ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
@@ -412,7 +438,12 @@ static int ptp_net_send(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   // check if write was successful, ts exists and ts_info is valid
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
     {
-      *ts = *(struct timespec *)ts_info->data;
+      struct timespec tx_ts = *(struct timespec *)ts_info->data;
+
+      if (ptp_timespec_is_valid(&tx_ts))
+        {
+          *ts = tx_ts;
+        }
     }
 
   return ret;
@@ -443,6 +474,9 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
       uint8_t info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
       l2tap_irec_hdr_t align;
   } u;
+
+  memset(&u, 0, sizeof(u));
+
   l2tap_extended_buff_t ptp_msg_ext_buff;
 
   ptp_msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
@@ -457,12 +491,28 @@ static int ptp_net_recv(FAR struct ptp_state_s *state, void *ptp_msg, uint16_t p
   int ret = read(state->ptp_socket, &ptp_msg_ext_buff, 0);
 
   // check if read was successful, ts exists and ts_info is valid
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP)
+  if (ret > 0 && ts)
   {
-    *ts = *(struct timespec *)ts_info->data;
+    ts->tv_sec = 0;
+    ts->tv_nsec = 0;
+
+    if (ts_info->type == L2TAP_IREC_TIME_STAMP)
+      {
+        struct timespec rx_ts = *(struct timespec *)ts_info->data;
+
+        if (ptp_timespec_is_valid(&rx_ts))
+          {
+            *ts = rx_ts;
+          }
+      }
+
     uint8_t msg_type = eth_frame[ETH_HEADER_LEN] & PTP_MSGTYPE_MASK;
-    (void)msg_type;
-    ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type), (long long)ts->tv_sec, ts->tv_nsec);
+
+    if (ptp_timespec_is_valid(ts))
+      {
+        ESP_LOGI(TAG, "[%s] RX ts: %lld.%09ld", ptp_msgtype_name(msg_type),
+                 (long long)ts->tv_sec, ts->tv_nsec);
+      }
   }
 
   memcpy(ptp_msg, &eth_frame[ETH_HEADER_LEN], ret);
@@ -1981,6 +2031,13 @@ static int ptp_process_pdelay_req(FAR struct ptp_state_s *state,
 
   /* t2 (peer-side RX) is state->rxtime from the incoming PDelay_Req. */
 
+  if (!ptp_timespec_is_valid(&state->rxtime))
+    {
+      ptpwarn("Missing RX timestamp for PDelay_Req seq %ld, dropping\n",
+              (long)ptp_get_sequence(&req->header));
+      return OK;
+    }
+
   memset(&resp, 0, sizeof(resp));
   resp.header = state->own_identity.header;
   resp.header.messagetype = PTP_MSGTYPE_PDELAY_RESP;
@@ -2082,6 +2139,15 @@ static int ptp_process_pdelay_resp(FAR struct ptp_state_s *state,
     {
       ptpwarn("Stale PDelay_Resp seq %d (expected %d)\n",
               (int)seq, (int)state->pdelay_req_seq);
+      return OK;
+    }
+
+  if (!ptp_timespec_is_valid(&state->rxtime))
+    {
+      ptpwarn("Missing RX timestamp for PDelay_Resp seq %d, dropping\n",
+              (int)seq);
+      state->pdelay_awaiting_resp = false;
+      state->pdelay_awaiting_followup = false;
       return OK;
     }
 
