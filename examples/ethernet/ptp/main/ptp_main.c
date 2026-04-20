@@ -158,7 +158,11 @@ void app_main(void)
 
     esp_eth_clock_cfg_t clock_cfg = {
         .eth_hndl  = s_eth_handles[0],
+#if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
+        .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_1AS,
+#else
         .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
+#endif
     };
     esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clock_cfg);
 

@@ -53,11 +53,23 @@
 /* Message types */
 
 #define PTP_MSGTYPE_MASK       0x0F
-#define PTP_MSGTYPE_SYNC          0
-#define PTP_MSGTYPE_DELAY_REQ     1
-#define PTP_MSGTYPE_FOLLOW_UP     8
-#define PTP_MSGTYPE_DELAY_RESP    9
-#define PTP_MSGTYPE_ANNOUNCE     11
+#define PTP_MSGTYPE_SYNC                   0
+#define PTP_MSGTYPE_DELAY_REQ              1
+#define PTP_MSGTYPE_PDELAY_REQ             2
+#define PTP_MSGTYPE_PDELAY_RESP            3
+#define PTP_MSGTYPE_FOLLOW_UP              8
+#define PTP_MSGTYPE_DELAY_RESP             9
+#define PTP_MSGTYPE_PDELAY_RESP_FOLLOW_UP  0xA
+#define PTP_MSGTYPE_ANNOUNCE              11
+
+/* High nibble of messagetype byte = transportSpecific / majorSdoId.
+ * 0x1 == IEEE 802.1AS (gPTP); 0x0 == IEEE 1588 default profile.
+ */
+
+#define PTP_TRANSPORT_SPECIFIC_SHIFT   4
+#define PTP_TRANSPORT_SPECIFIC_MASK    0xF0
+#define PTP_TRANSPORT_SPECIFIC_1588    0x0
+#define PTP_TRANSPORT_SPECIFIC_8021AS  0x1
 
 /* Message flags */
 
@@ -136,6 +148,35 @@ struct ptp_delay_resp_s
 {
   struct ptp_header_s header;
   uint8_t receivetimestamp[10];
+  uint8_t reqidentity[8];
+  uint8_t reqportindex[2];
+};
+
+/* Pdelay_Req (IEEE 802.1AS / 1588 P2P): peer-to-peer link-delay request. */
+
+struct ptp_pdelay_req_s
+{
+  struct ptp_header_s header;
+  uint8_t origintimestamp[10];
+  uint8_t reserved[10];           /* reserved for future use */
+};
+
+/* Pdelay_Resp: replies with the peer's RX time of the incoming Pdelay_Req. */
+
+struct ptp_pdelay_resp_s
+{
+  struct ptp_header_s header;
+  uint8_t requestreceipttimestamp[10]; /* t2 = peer-side RX of Pdelay_Req */
+  uint8_t reqidentity[8];
+  uint8_t reqportindex[2];
+};
+
+/* Pdelay_Resp_Follow_Up: carries t3, the peer's TX of the Pdelay_Resp. */
+
+struct ptp_pdelay_resp_follow_up_s
+{
+  struct ptp_header_s header;
+  uint8_t responseorigintimestamp[10]; /* t3 = peer-side TX of Pdelay_Resp */
   uint8_t reqidentity[8];
   uint8_t reqportindex[2];
 };

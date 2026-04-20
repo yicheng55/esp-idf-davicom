@@ -59,6 +59,30 @@ menu "PTP Daemon Configuration"
                 Set PTP domain to participate in. Default domain is 0, other domains
                 can be used to isolate reference clocks from each other.
 
+        config NETUTILS_PTPD_IEEE_802_1AS
+            bool "Use IEEE 802.1AS (gPTP) profile"
+            default ETH_DM9058_PTP_TRANSPORT_IEEE_802_1AS if ETH_SPI_ETHERNET_DM9058
+            default n
+            select NETUTILS_PTPD_TWOSTEP_SYNC
+            help
+                Enable the IEEE 802.1AS (gPTP) profile:
+                  * L2 destination MAC 01:80:C2:00:00:0E
+                  * transportSpecific / majorSdoId = 0x1
+                  * Forced two-step sync (selects NETUTILS_PTPD_TWOSTEP_SYNC)
+                  * Peer-to-peer (P2P) delay mechanism:
+                    Pdelay_Req / Pdelay_Resp / Pdelay_Resp_Follow_Up
+                    exchange replaces the E2E Delay_Req path.
+                Must match ETH_DM9058_PTP_TRANSPORT_IEEE_802_1AS.
+
+        config NETUTILS_PTPD_PDELAYREQ_INTERVAL_MS
+            int "gPTP PDelay_Req transmit interval (ms)"
+            depends on NETUTILS_PTPD_IEEE_802_1AS
+            default 250
+            range 31 4000
+            help
+                How often the node transmits Pdelay_Req to measure per-link delay.
+                gPTP spec default (logMinPdelayReqInterval = -2) is 250 ms.
+
         if NETUTILS_PTPD_SERVER
 
             config NETUTILS_PTPD_PRIORITY1
