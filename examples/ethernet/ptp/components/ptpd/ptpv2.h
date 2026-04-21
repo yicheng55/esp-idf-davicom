@@ -52,6 +52,9 @@
 
 /* Message types */
 
+/* transportSpecific (majorSdoId) upper nibble: 0x0 = IEEE 1588, 0x1 = gPTP (IEEE 802.1AS) */
+#define PTP_TRANSPORT_SPECIFIC_GPTP  0x10
+
 #define PTP_MSGTYPE_MASK       0x0F
 #define PTP_MSGTYPE_SYNC          0
 #define PTP_MSGTYPE_DELAY_REQ     1

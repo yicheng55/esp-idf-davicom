@@ -1198,7 +1198,7 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
 
   memset(&msg, 0, sizeof(msg));
   msg = state->own_identity;
-  msg.header.messagetype = PTP_MSGTYPE_ANNOUNCE;
+  msg.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_ANNOUNCE;
   msg.header.messagelength[1] = sizeof(msg);
 
   ptp_increment_sequence(&state->announce_seq, &msg.header);
@@ -1254,7 +1254,7 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
 
   memset(&msg, 0, sizeof(msg));
   msg.header = state->own_identity.header;
-  msg.header.messagetype = PTP_MSGTYPE_SYNC;
+  msg.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_SYNC;
   msg.header.messagelength[1] = sizeof(msg);
 
 #ifdef CONFIG_NETUTILS_PTPD_TWOSTEP_SYNC
@@ -1299,7 +1299,7 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
   ptp_gettime(state, &ts);
 #endif // !ESP_PTP
   timespec_to_ptp_format(&ts, msg.origintimestamp);
-  msg.header.messagetype = PTP_MSGTYPE_FOLLOW_UP;
+  msg.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_FOLLOW_UP;
   msg.header.flags[0] = 0;
 #ifndef ESP_PTP
   addr.sin_port = HTONS(PTP_UDP_PORT_INFO);
@@ -1343,7 +1343,7 @@ static int ptp_send_delay_req(FAR struct ptp_state_s *state)
 
   memset(&req, 0, sizeof(req));
   req.header = state->own_identity.header;
-  req.header.messagetype = PTP_MSGTYPE_DELAY_REQ;
+  req.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_DELAY_REQ;
   req.header.messagelength[1] = sizeof(req);
   ptp_increment_sequence(&state->delay_req_seq, &req.header);
 
@@ -1386,7 +1386,7 @@ static int ptp_send_pdelay_req(FAR struct ptp_state_s *state)
 
   memset(&req, 0, sizeof(req));
   req.header = state->own_identity.header;
-  req.header.messagetype = PTP_MSGTYPE_PDELAY_REQ;
+  req.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_PDELAY_REQ;
   req.header.messagelength[1] = sizeof(req);
   ptp_increment_sequence(&state->pdelay_req_seq, &req.header);
 
@@ -1421,7 +1421,7 @@ static int ptp_send_pdelay_resp(FAR struct ptp_state_s *state,
 
   memset(&resp, 0, sizeof(resp));
   resp.header = state->own_identity.header;
-  resp.header.messagetype = PTP_MSGTYPE_PDELAY_RESP;
+  resp.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_PDELAY_RESP;
   resp.header.messagelength[1] = sizeof(resp);
 #if CONFIG_NETUTILS_PTPD_TWOSTEP_SYNC
   resp.header.flags[0] = PTP_FLAGS0_TWOSTEP;
@@ -1449,7 +1449,7 @@ static int ptp_send_pdelay_resp(FAR struct ptp_state_s *state,
 
     memset(&follow_up, 0, sizeof(follow_up));
     follow_up.header = state->own_identity.header;
-    follow_up.header.messagetype = PTP_MSGTYPE_PDELAY_RESP_FOLLOW_UP;
+    follow_up.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_PDELAY_RESP_FOLLOW_UP;
     follow_up.header.messagelength[1] = sizeof(follow_up);
     memcpy(follow_up.header.sequenceid, msg->header.sequenceid,
            sizeof(follow_up.header.sequenceid));
@@ -2001,7 +2001,7 @@ static int ptp_process_delay_req(FAR struct ptp_state_s *state,
 
   memset(&resp, 0, sizeof(resp));
   resp.header = state->own_identity.header;
-  resp.header.messagetype = PTP_MSGTYPE_DELAY_RESP;
+  resp.header.messagetype = PTP_TRANSPORT_SPECIFIC_GPTP | PTP_MSGTYPE_DELAY_RESP;
   resp.header.messagelength[1] = sizeof(resp);
   timespec_to_ptp_format(&state->rxtime, resp.receivetimestamp);
   memcpy(resp.reqidentity, msg->header.sourceidentity,
