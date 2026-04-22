@@ -53,6 +53,6 @@ The slave's `clock_source_valid` debounce is not in the Nuttx original — it is
 
 ## Files outside this tree that the example depends on
 
-- `$IDF_PATH/examples/ethernet/basic/components/ethernet_init` — `example_eth_init` (board pin / PHY selection).
+- `$IDF_PATH/examples/ethernet/dm9058_basic/components/ethernet_init` — `example_eth_init` (board pin / PHY selection).
 - `$IDF_PATH/components/esp_eth/src/spi/dm9058/` — DM9058 MAC + PTP driver (modified in this IDF tree).
 - `$IDF_PATH/DM9058_PTP_整合指南.md` — integration notes for the DM9058 PTP additions.
