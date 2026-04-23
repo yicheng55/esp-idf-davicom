@@ -1,0 +1,33 @@
+menu "ESP Ethernet DM9058"
+    depends on ETH_USE_SPI_ETHERNET
+
+    config ETH_SPI_ETHERNET_DM9058
+        bool "Use DM9058"
+        help
+            DM9058 is a fast Ethernet controller with an SPI interface.
+            It's also integrated with a 10/100M PHY and MAC.
+            Select this to enable DM9058 driver.
+
+    config ETH_DM9058_PTP_TWO_STEP_MODE
+        bool "DM9058 PTP two-step timestamp mode"
+        depends on ETH_SPI_ETHERNET_DM9058
+        default y
+        help
+            If enabled, the DM9058 hardware captures TX timestamps for software
+            to read and embed in a separate FOLLOW_UP message (two-step mode).
+            If disabled, the hardware inserts the timestamp directly into the
+            SYNC packet at transmission time (one-step mode).
+            This setting must match the PTP daemon's NETUTILS_PTPD_TWOSTEP_SYNC
+            configuration to ensure correct PTP synchronization behavior.
+
+    config ETH_DM9058_PTP_TRANSPORT_IEEE_802_1AS
+        bool "DM9058 PTP transport = IEEE 802.1AS (gPTP)"
+        depends on ETH_SPI_ETHERNET_DM9058
+        default n
+        help
+            Select IEEE 802.1AS (gPTP) as the DM9058 PTP transport.
+            When disabled the transport is IEEE 802.3 (1588 default L2 profile).
+            This setting must match the PTP daemon's NETUTILS_PTPD_IEEE_802_1AS
+            so the hardware filter and protocol profile agree.
+
+endmenu

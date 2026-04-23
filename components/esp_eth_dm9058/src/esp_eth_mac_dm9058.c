@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <sys/cdefs.h>
 #include <inttypes.h>
-#include "esp_eth_mac_spi.h"
+#include "esp_eth_mac_dm9058.h"
 #include "driver/gpio.h"
 #include "esp_private/gpio.h"
 #include "soc/io_mux_reg.h"

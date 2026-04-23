@@ -43,12 +43,6 @@ if(CONFIG_ETH_ENABLED)
                          "src/spi/dm9051/esp_eth_phy_dm9051.c")
     endif()
 
-    if(CONFIG_ETH_SPI_ETHERNET_DM9058)
-        list(APPEND srcs "src/spi/dm9058/esp_eth_mac_dm9058.c"
-                         "src/spi/dm9058/esp_eth_ptp_dm9058.c"
-                         "src/spi/dm9058/esp_eth_phy_dm9058.c")
-    endif()
-
     if(CONFIG_ETH_SPI_ETHERNET_W5500)
         list(APPEND srcs "src/spi/w5500/esp_eth_mac_w5500.c"
                          "src/spi/w5500/esp_eth_phy_w5500.c")

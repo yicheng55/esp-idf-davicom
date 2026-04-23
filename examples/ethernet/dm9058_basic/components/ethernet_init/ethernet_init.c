@@ -12,6 +12,10 @@
 #if CONFIG_EXAMPLE_USE_SPI_ETHERNET
 #include "driver/spi_master.h"
 #endif // CONFIG_EXAMPLE_USE_SPI_ETHERNET
+#if CONFIG_ETH_SPI_ETHERNET_DM9058
+#include "esp_eth_mac_dm9058.h"
+#include "esp_eth_phy_dm9058.h"
+#endif
 
 #if CONFIG_EXAMPLE_SPI_ETHERNETS_NUM
 #define SPI_ETHERNETS_NUM           CONFIG_EXAMPLE_SPI_ETHERNETS_NUM
