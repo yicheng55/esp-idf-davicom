@@ -1533,9 +1533,13 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   {
     /* Show whichever delay term is actually in use: peer delay (P2P/802.1AS)
      * or the classic E2E path_delay_ns. */
+#if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
     long display_delay_ns = (long)(state->peer_mean_path_delay_valid
                                    ? state->peer_mean_path_delay_ns
                                    : state->path_delay_ns);
+#else
+    long display_delay_ns = (long)state->path_delay_ns;
+#endif
     ESP_LOGW(TAG, "offset_ns %+9lli, adj %+6li, drift_acc %+7li, path_delay %5ld ns\n",
              offset_ns, adj, state->offset_pi.drift_acc, display_delay_ns);
   }
