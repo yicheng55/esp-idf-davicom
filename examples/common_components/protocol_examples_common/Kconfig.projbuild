@@ -156,14 +156,6 @@ menu "Example Connection Configuration"
                 help
                     Select external SPI-Ethernet module.
 
-            config EXAMPLE_USE_DM9058
-                bool "DM9058 Module"
-                select EXAMPLE_USE_SPI_ETHERNET
-                select ETH_USE_SPI_ETHERNET
-                select ETH_SPI_ETHERNET_DM9058
-                help
-                    Select external SPI-Ethernet module.
-
             config EXAMPLE_USE_W5500
                 bool "W5500 Module"
                 select EXAMPLE_USE_SPI_ETHERNET

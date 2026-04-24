@@ -1,0 +1,116 @@
+menu "DM9058 Ethernet Configuration"
+
+    orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
+
+    config EXAMPLE_DM9058_ENABLE
+        bool "Enable DM9058 SPI Ethernet"
+        default n
+        select ETH_USE_SPI_ETHERNET
+        select ETH_SPI_ETHERNET_DM9058
+        help
+            Initialize DM9058 SPI Ethernet via the dedicated dm9058_eth_connect
+            component. This is independent from protocol_examples_common's
+            eth_connect.c so the upstream file stays untouched.
+
+    if EXAMPLE_DM9058_ENABLE
+
+        config EXAMPLE_DM9058_SPI_HOST
+            int "SPI host (0..2)"
+            range 0 2
+            default 1
+            help
+                Set the SPI host (peripheral) used by DM9058.
+                0 = SPI1_HOST, 1 = SPI2_HOST, 2 = SPI3_HOST.
+
+        config EXAMPLE_DM9058_SPI_SCLK_GPIO
+            int "SPI SCLK GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 16
+            help
+                GPIO used for SPI SCLK.
+
+        config EXAMPLE_DM9058_SPI_MOSI_GPIO
+            int "SPI MOSI GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 17
+            help
+                GPIO used for SPI MOSI.
+
+        config EXAMPLE_DM9058_SPI_MISO_GPIO
+            int "SPI MISO GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 18
+            help
+                GPIO used for SPI MISO.
+
+        config EXAMPLE_DM9058_SPI_CS_GPIO
+            int "SPI CS GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 15
+            help
+                GPIO used for SPI chip-select.
+
+        config EXAMPLE_DM9058_SPI_INT_GPIO
+            int "INT GPIO (-1 to use polling)"
+            range -1 ENV_GPIO_IN_RANGE_MAX
+            default 8
+            help
+                GPIO used for the DM9058 interrupt line. Set to -1 to use
+                polling mode instead of interrupts.
+
+        config EXAMPLE_DM9058_SPI_POLL_MS
+            int "Polling period (ms)"
+            depends on EXAMPLE_DM9058_SPI_INT_GPIO < 0
+            default 10
+            help
+                Polling interval used when INT GPIO is disabled.
+
+        config EXAMPLE_DM9058_SPI_CLOCK_MHZ
+            int "SPI clock (MHz)"
+            range 5 80
+            default 20
+            help
+                SPI clock speed in MHz.
+
+        config EXAMPLE_DM9058_PHY_RST_GPIO
+            int "PHY reset GPIO (-1 to disable)"
+            range -1 ENV_GPIO_OUT_RANGE_MAX
+            default -1
+            help
+                GPIO used to hardware-reset the PHY. Set to -1 to disable.
+
+        config EXAMPLE_DM9058_PHY_ADDR
+            int "PHY address"
+            range 0 31
+            default 1
+            help
+                PHY address per board schematic.
+
+        config EXAMPLE_DM9058_ENABLE_PTP
+            bool "Enable IEEE 1588 PTP support"
+            default n
+            help
+                When enabled, dm9058_ethernet_connect() also calls
+                esp_eth_clock_init() so upper layers (e.g. ptpd) can read
+                DM9058 hardware timestamps via the esp_eth_time component.
+
+        choice EXAMPLE_DM9058_PTP_TRANSPORT
+            prompt "PTP transport"
+            depends on EXAMPLE_DM9058_ENABLE_PTP
+            default EXAMPLE_DM9058_PTP_TRANSPORT_802_3
+            help
+                Select the PTP transport that matches your network.
+
+            config EXAMPLE_DM9058_PTP_TRANSPORT_802_3
+                bool "IEEE 802.3 (L2)"
+            config EXAMPLE_DM9058_PTP_TRANSPORT_802_1AS
+                bool "IEEE 802.1AS"
+            config EXAMPLE_DM9058_PTP_TRANSPORT_UDP_V4
+                bool "UDP / IPv4"
+            config EXAMPLE_DM9058_PTP_TRANSPORT_UDP_V6
+                bool "UDP / IPv6"
+        endchoice
+
+    endif # EXAMPLE_DM9058_ENABLE
+
+endmenu
