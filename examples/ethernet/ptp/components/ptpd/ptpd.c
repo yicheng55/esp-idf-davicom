@@ -1435,8 +1435,10 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
 
   // Compute how off we are against master
   int64_t offset_ns = timespec_delta_ns(remote_timestamp, local_timestamp);
+#if !CONFIG_NETUTILS_PTPD_IEEE_802_1AS
   offset_ns += state->path_delay_ns;
-#if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
+#else
+  /* gPTP: link delay comes from PDelay (peer mean path delay), not E2E. */
   if (state->peer_mean_path_delay_valid)
     {
       offset_ns += state->peer_mean_path_delay_ns;
@@ -1534,9 +1536,7 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
     /* Show whichever delay term is actually in use: peer delay (P2P/802.1AS)
      * or the classic E2E path_delay_ns. */
 #if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
-    long display_delay_ns = (long)(state->peer_mean_path_delay_valid
-                                   ? state->peer_mean_path_delay_ns
-                                   : state->path_delay_ns);
+    long display_delay_ns = (long)state->peer_mean_path_delay_ns;
 #else
     long display_delay_ns = (long)state->path_delay_ns;
 #endif
@@ -1594,8 +1594,9 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
           (long)remote_timestamp->tv_nsec);
 
   delta_ns = timespec_delta_ns(remote_timestamp, local_timestamp);
+#if !CONFIG_NETUTILS_PTPD_IEEE_802_1AS
   delta_ns += state->path_delay_ns;
-#if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
+#else
   if (state->peer_mean_path_delay_valid)
     {
       delta_ns += state->peer_mean_path_delay_ns;
