@@ -9,6 +9,8 @@
 - `components/esp_eth/src/spi/dm9058/esp_eth_ptp_dm9058.h`
 - `components/esp_eth/include/esp_eth_mac_spi.h`
 - `examples/ethernet/ptp/components/esp_eth_time/esp_eth_time.c`
+- `examples/ethernet/ptp/components/ptpd/ptpd.c`
+- `examples/ethernet/ptp/main/ptp_main.c`
 
 ## 專案現況摘要
 
@@ -17,7 +19,7 @@
 1. `ETH_MAC_DM9058_CMD_PTP_ENABLE` 目前不是傳 `bool *`，而是傳 `esp_eth_ptp_dm9058_enable_config_t *`。
 2. `ETH_MAC_DM9058_CMD_G_PTP_RX_TIME` 在 DM9058 驅動中已明確回傳 `ESP_ERR_NOT_SUPPORTED`，RX 時戳不再用 ioctl 輪詢。
 3. RX 硬體時戳是在 MAC RX task 內解碼後，透過 `stack_input_info()` 和封包一起往上層傳。
-4. 目前驅動只會把 `SYNC` 和 `DELAY_REQ` 這兩類 PTP 封包的 RX 時戳往上轉交；其他 PTP 訊息即使有時戳，也會在 MAC 層被過濾掉。
+4. 目前驅動只會把 PTP event 訊息的 RX 時戳往上轉交，包含 `SYNC`、`DELAY_REQ`、`PDELAY_REQ`、`PDELAY_RESP`；其他 PTP 訊息即使有時戳，也會在 MAC 層被過濾掉。
 5. DM9058 的 Target Time / Target Callback ioctl case 已保留，但目前實作仍回傳 `ESP_ERR_NOT_SUPPORTED`。
 6. two-step / one-step 的預設模式由 `CONFIG_ETH_DM9058_PTP_TWO_STEP_MODE` 控制，MAC 自動處理路徑會使用這個設定。
 
@@ -243,7 +245,7 @@ Kconfig 說明如下：
 - 啟用時: 硬體擷取 TX timestamp，由軟體在後續 `FOLLOW_UP` 訊息中帶出，屬於 two-step
 - 停用時: 硬體直接在 `SYNC` 封包送出時插入 timestamp，屬於 one-step
 
-這個設定必須和 PTP daemon 的 two-step 設定一致。
+這個設定必須和 PTP daemon 的 two-step 設定一致。PTP example 目前會讓 `NETUTILS_PTPD_TWOSTEP_SYNC` 跟隨 DM9058 two-step 設定，避免 daemon 行為和硬體 timestamp 模式不一致。
 
 ## TX 封包處理流程
 
@@ -330,7 +332,7 @@ esp_err_t esp_eth_ptp_dm9058_rx_timestamp(const uint8_t *rx_ts_buffer,
 
 - `rx_ts_valid == true`
 - 該封包成功被辨識為 PTP
-- 訊息型別是 `SYNC` 或 `DELAY_REQ`
+- 訊息型別是 `SYNC`、`DELAY_REQ`、`PDELAY_REQ` 或 `PDELAY_RESP`
 
 其他 PTP 封包即使 RX FIFO 內有時戳，目前也只會在 MAC 層記錄 debug log，不會往上層傳遞。
 
@@ -354,7 +356,21 @@ esp_eth_ioctl(cfg->eth_hndl, ETH_MAC_ESP_CMD_PTP_ENABLE, &ptp_cfg);
 - `esp_eth_clock_gettime()` / `settime()` / `adjtime()` 對 DM9058 是可用的
 - `esp_eth_clock_get_rx_time()` 目前對 DM9058 不能再當成有效的 RX timestamp 來源，因為底層 ioctl 已不支援
 
-PTP example 中保留的 `G_PTP_RX_TIME` 呼叫片段已被 `#if 0` 包住，這正反映出目前路徑已改為依賴 L2TAP / `stack_input_info()` 提供的封包綁定時間資訊。
+`examples/ethernet/ptp/main/ptp_main.c` 會依 `CONFIG_NETUTILS_PTPD_IEEE_802_1AS` 選擇 transport：
+
+```c
+esp_eth_clock_cfg_t clock_cfg = {
+    .eth_hndl  = s_eth_handles[0],
+#if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
+    .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_1AS,
+#else
+    .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
+#endif
+};
+esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clock_cfg);
+```
+
+PTP daemon (`ptpd.c`) 則透過 L2TAP extended buffer 的 `L2TAP_IREC_TIME_STAMP` info record 收發 timestamp。PTP example 中保留的 `G_PTP_RX_TIME` 呼叫片段已被 `#if 0` 包住，這正反映出目前路徑已改為依賴 L2TAP / `stack_input_info()` 提供的封包綁定時間資訊。
 
 ## 硬體暫存器對應
 
@@ -391,7 +407,7 @@ PTP example 中保留的 `G_PTP_RX_TIME` 呼叫片段已被 `#if 0` 包住，這
 
 ### 3. 目前 RX timestamp 不是所有 PTP 訊息都會往上傳
 
-現在 MAC 層只轉送 `SYNC` 和 `DELAY_REQ` 的 RX timestamp。若後續需要 `PDELAY_REQ`、`PDELAY_RESP` 或其他訊息類型的 packet-bound RX timestamp，必須再調整 MAC 層過濾條件。
+現在 MAC 層只轉送 `SYNC`、`DELAY_REQ`、`PDELAY_REQ`、`PDELAY_RESP` 這些 event 訊息的 RX timestamp。若後續需要 `FOLLOW_UP`、`DELAY_RESP`、`ANNOUNCE` 或其他 general 訊息的 packet-bound RX timestamp，必須再調整 MAC 層過濾條件。
 
 ### 4. `parse_tx_packet()` 的 transport 解析能力有限
 
@@ -419,7 +435,7 @@ if (!ptp->enabled) {
 若上層一直收不到 RX timestamp，要先確認兩件事：
 
 - RX FIFO 內是否真的有 timestamp
-- 封包型別是否屬於目前 MAC 允許往上轉交的 `SYNC` 或 `DELAY_REQ`
+- 封包型別是否屬於目前 MAC 允許往上轉交的 `SYNC`、`DELAY_REQ`、`PDELAY_REQ` 或 `PDELAY_RESP`
 
 ### 檢查 two-step 設定是否和 PTP daemon 一致
 

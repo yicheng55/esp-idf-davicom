@@ -1,17 +1,49 @@
 # DM9058 PTP 功能優化整合方案
 
-## 優化目標
+這份文件依據目前專案實作，整理 DM9058 PTP 已完成的 MAC 層整合方式，以及後續仍值得優化的項目。舊版內容曾以「尚未整合」的角度描述要修改 `transmit()`、`receive()`、ioctl enum 與 RX timestamp 快取；目前這些核心路徑已經重構完成，因此本文件改以現況、限制與下一步優化為主。
 
-將 PTP 功能無縫整合到 MAC 層的 `transmit` 和 `receive` 函數中，實現：
-1. **自動 PTP 封包處理** - 發送時自動識別並配置 PTP 硬體
-2. **透明時戳提取** - 接收時自動提取並存儲 PTP 時戳
-3. **簡化應用層使用** - 應用層無需手動調用 PTP 函數
+## 目前結論
 
-## 方案一：全自動模式（推薦）
+目前 DM9058 PTP 整合已具備以下能力：
 
-### 1. 擴展 MAC 層結構
+1. PTP 硬體啟用透過 `esp_eth_ptp_dm9058_enable_config_t` 指定 enable 狀態與 transport。
+2. MAC TX 路徑會在 `ptp_auto_process` 與 `ptp.enabled` 同時成立時，自動解析 PTP frame 並配置 `TCR`。
+3. MAC RX task 會解析 DM9058 RX FIFO 內嵌 timestamp，並透過 `stack_input_info()` 把 timestamp metadata 隨 frame 傳給上層。
+4. L2TAP / ptpd 透過 extended buffer info record 取得封包綁定的 RX/TX timestamp。
+5. RX timestamp 不再透過「最後一筆 RX timestamp」ioctl 輪詢取得。
+6. one-step / two-step 模式由 `CONFIG_ETH_DM9058_PTP_TWO_STEP_MODE` 決定，沒有現行的動態切換 ioctl。
 
-在 `esp_eth_mac_dm9058.c` 中的 `esp32_DM9058_t` 結構添加 PTP 配置：
+## 現行架構
+
+```text
+Application / ptpd
+    ├── esp_eth_clock_init()
+    │   └── ETH_MAC_ESP_CMD_PTP_ENABLE
+    ├── L2TAP read/write extended buffer
+    │   └── L2TAP_IREC_TIME_STAMP
+    └── esp_eth_clock_gettime/settime/adjtime()
+
+esp_eth MAC mediator
+    ├── stack_input_info(frame, len, optional_rx_timestamp)
+    └── transmit_ctrl_vargs(optional_tx_timestamp)
+
+DM9058 MAC driver
+    ├── esp32_DM9058_custom_ioctl()
+    ├── esp32_DM9058_transmit()
+    ├── DM9058_task_receive()
+    └── DM9058_handle_rx_ptp_timestamp()
+
+DM9058 PTP helper
+    ├── esp_eth_ptp_dm9058_enable()
+    ├── esp_eth_ptp_dm9058_prepare_tx_locked()
+    ├── esp_eth_ptp_dm9058_parse_tx_packet()
+    ├── esp_eth_ptp_dm9058_parse_rx_header()
+    └── esp_eth_ptp_dm9058_rx_timestamp()
+```
+
+## MAC 層資料結構
+
+目前 `esp32_DM9058_t` 已經內含 PTP context 與自動處理設定：
 
 ```c
 typedef struct {
@@ -20,610 +52,205 @@ typedef struct {
     eth_spi_custom_driver_t spi;
     TaskHandle_t rx_task_hdl;
     SemaphoreHandle_t multi_reg_axs_mutex;
-    uint32_t sw_reset_timeout_ms;
-    int int_gpio_num;
-    esp_timer_handle_t poll_timer;
-    uint32_t poll_period_ms;
-    uint8_t addr[ETH_ADDR_LEN];
-    bool packets_remain;
-    bool flow_ctrl_enabled;
-    uint8_t *rx_buffer;
-    uint8_t hash_filter_cnt[DM9058_HASH_FILTER_TABLE_SIZE];
+    /* ... */
     esp_eth_ptp_dm9058_t ptp;
-
-    /* === 新增 PTP 配置欄位 === */
-    bool ptp_auto_process;                    // 是否自動處理 PTP 封包
-    bool ptp_two_step_mode;                   // PTP 模式：true=雙步，false=單步
-    esp_eth_ptp_dm9058_time_t last_rx_timestamp;  // 最後接收的時戳
-    bool rx_timestamp_valid;                  // RX 時戳是否有效
-    esp_eth_ptp_dm9058_time_t last_tx_timestamp;  // 最後傳輸的時戳
-    bool tx_timestamp_valid;                  // TX 時戳是否有效
+    bool ptp_auto_process;
+    bool ptp_two_step_mode;
 } esp32_DM9058_t;
 ```
 
-### 2. 優化 Transmit 函數
+注意目前沒有用 `last_rx_timestamp` / `rx_timestamp_valid` 在 MAC 物件上快取最後一筆 RX timestamp。RX timestamp 以區域變數保留在 RX task 流程中，確認封包類型後直接透過 `stack_input_info()` 往上傳，這比全域快取更能維持 timestamp 與 frame 的對應關係。
 
-**位置**: `esp_eth_mac_dm9058.c` 的 `esp32_DM9058_transmit()` 函數（第 797 行）
+## PTP 啟用流程
 
-**優化前**（當前實作）：
+### 正確的 enable 參數
+
+目前啟用 PTP 必須傳入設定結構：
+
 ```c
-static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t length)
-{
-    esp_err_t ret = ESP_OK;
-    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
+esp_eth_ptp_dm9058_enable_config_t ptp_cfg = {
+    .enable = true,
+    .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
+};
 
-    ESP_GOTO_ON_FALSE(length <= ETH_MAX_PACKET_SIZE, ESP_ERR_INVALID_ARG, err,
-                      TAG, "frame size is too big (actual %" PRIu32 ", maximum %d)", length, ETH_MAX_PACKET_SIZE);
-
-    uint8_t reg_nsr = 0;
-    int64_t wait_time =  esp_timer_get_time();
-    do {
-        ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_NSR, &reg_nsr), err, TAG, "read NSR failed");
-        reg_nsr &= (NSR_TX2END | NSR_TX1END);
-    } while((!reg_nsr) && ((esp_timer_get_time() - wait_time) < 100));
-
-    if (!reg_nsr) {
-        ESP_LOGE(TAG, "last transmit still in progress, cannot send.");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if(reg_nsr == (NSR_TX2END | NSR_TX1END)) {
-        ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_MPTRCR, MPTRCR_RST_TX), err, TAG, "write MPTRCR failed");
-    }
-
-    /* set tx length */
-    ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_TXPLL, length & 0xFF), err, TAG, "write TXPLL failed");
-    ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_TXPLH, (length >> 8) & 0xFF), err, TAG, "write TXPLH failed");
-    /* copy data to tx memory */
-    ESP_GOTO_ON_ERROR(DM9058_memory_write(emac, buf, length), err, TAG, "write memory failed");
-    return ESP_OK;
-err:
-    return ret;
-}
+ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_PTP_ENABLE, &ptp_cfg));
 ```
 
-**優化後**（整合 PTP 自動處理）：
-```c
-static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t length)
-{
-    esp_err_t ret = ESP_OK;
-    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
+`transport` 會決定 DM9058 timestamp offset 與 checksum offset：
 
-    ESP_GOTO_ON_FALSE(length <= ETH_MAX_PACKET_SIZE, ESP_ERR_INVALID_ARG, err,
-                      TAG, "frame size is too big (actual %" PRIu32 ", maximum %d)", length, ETH_MAX_PACKET_SIZE);
+| Transport | PTPTSO | PTPCSO | 用途 |
+| --- | --- | --- | --- |
+| `ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4` | `0x4E` | `0x3C` | PTP over UDP/IPv4 |
+| `ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV6` | `0x62` | `0x50` | PTP over UDP/IPv6 |
+| `ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3` | `0x32` | `0x20` | Layer 2 IEEE 1588 |
+| `ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_1AS` | `0x32` | `0x20` | gPTP / 802.1AS |
 
-    /* === 新增：PTP 自動處理 === */
-    if (emac->ptp_auto_process && emac->ptp.enabled) {
-        ret = esp_eth_ptp_dm9058_prepare_tx(&emac->ptp, buf, length, emac->ptp_two_step_mode);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "PTP prepare tx failed: %d, continue anyway", ret);
-            // 不返回錯誤，繼續發送非 PTP 封包
-        }
-    }
-    /* === PTP 處理結束 === */
+### PTP example 的 transport 選擇
 
-    uint8_t reg_nsr = 0;
-    int64_t wait_time =  esp_timer_get_time();
-    do {
-        ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_NSR, &reg_nsr), err, TAG, "read NSR failed");
-        reg_nsr &= (NSR_TX2END | NSR_TX1END);
-    } while((!reg_nsr) && ((esp_timer_get_time() - wait_time) < 100));
-
-    if (!reg_nsr) {
-        ESP_LOGE(TAG, "last transmit still in progress, cannot send.");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if(reg_nsr == (NSR_TX2END | NSR_TX1END)) {
-        ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_MPTRCR, MPTRCR_RST_TX), err, TAG, "write MPTRCR failed");
-    }
-
-    /* set tx length */
-    ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_TXPLL, length & 0xFF), err, TAG, "write TXPLL failed");
-    ESP_GOTO_ON_ERROR(DM9058_register_write(emac, DM9058_TXPLH, (length >> 8) & 0xFF), err, TAG, "write TXPLH failed");
-    /* copy data to tx memory */
-    ESP_GOTO_ON_ERROR(DM9058_memory_write(emac, buf, length), err, TAG, "write memory failed");
-
-    /* === 新增：發送後獲取 TX 時戳 === */
-    if (emac->ptp_auto_process && emac->ptp.enabled) {
-        // 標記 TX 時戳為無效，等待實際讀取
-        emac->tx_timestamp_valid = false;
-        // 注意：實際的 TX 時戳需要在發送完成後讀取
-        // 可以在後續的中斷處理或輪詢中讀取
-    }
-    /* === TX 時戳處理結束 === */
-
-    return ESP_OK;
-err:
-    return ret;
-}
-```
-
-### 3. 優化 Receive 相關函數
-
-**位置**: `esp_eth_mac_dm9058.c` 的 `DM9058_frame_to_rx_buffer()` 函數（第 862 行）
-
-**優化前**（當前實作）：
-```c
-static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
-{
-    esp_err_t ret = ESP_OK;
-    uint8_t rxbyte = 0;
-    __attribute__((aligned(4))) DM9058_rx_header_t header;
-    bool try_again = false;
-
-    do {
-        *size = 0;
-        uint8_t reg_nsr = 0;
-        ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_NSR, &reg_nsr), err, TAG, "read NSR failed");
-        if (reg_nsr & NSR_RXRDY) {
-            /* dummy read, get the most updated data */
-            ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
-            ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
-            if (0x01 != rxbyte) {
-                ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
-                ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
-            }
-            ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, (uint8_t *)&header, sizeof(header)), err, TAG, "read rx header failed");
-            uint16_t rx_len = header.length_low + (header.length_high << 8);
-            /* store the whole frame to preallocated memory */
-            if (rx_len <= ETH_MAX_PACKET_SIZE) {
-                ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
-            } else {
-                /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
-                ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
-                ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "invalid frame length, reset rx fifo pointer");
-            }
-            if (header.status & (RSR_RF | RSR_RWTO | RSR_CE | RSR_FOE)) {
-                /* erroneous frames should not be forwarded by DM9058, however, if it happens, just skip it */
-                DM9058_skip_recv_frame(emac, rx_len);
-                ESP_LOGE(TAG, "receive status error: %" PRIx8 "H", header.status);
-                /* try again to check if other frame is waiting */
-                try_again = true;
-            } else {
-                *size = rx_len;
-            }
-        }
-    } while (try_again);
-err:
-    return ret;
-}
-```
-
-**優化後**（整合 PTP 時戳提取）：
-```c
-static esp_err_t DM9058_frame_to_rx_buffer(esp32_DM9058_t *emac, uint16_t *size)
-{
-    esp_err_t ret = ESP_OK;
-    uint8_t rxbyte = 0;
-    __attribute__((aligned(4))) DM9058_rx_header_t header;
-    bool try_again = false;
-
-    do {
-        *size = 0;
-        uint8_t reg_nsr = 0;
-        ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_NSR, &reg_nsr), err, TAG, "read NSR failed");
-        if (reg_nsr & NSR_RXRDY) {
-            /* dummy read, get the most updated data */
-            ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
-            ESP_GOTO_ON_ERROR(DM9058_register_read(emac, DM9058_MRCMDX, &rxbyte), err, TAG, "read MRCMDX failed");
-            if (0x01 != rxbyte) {
-                ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
-                ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "unexpected rx flag (0x%" PRIx8 "), reset rx fifo pointer", rxbyte);
-            }
-            ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, (uint8_t *)&header, sizeof(header)), err, TAG, "read rx header failed");
-            uint16_t rx_len = header.length_low + (header.length_high << 8);
-
-            /* === 新增：PTP 時戳預處理 === */
-            esp_eth_ptp_dm9058_rx_info_t rx_info = {0};
-            uint8_t rx_header_bytes[4] = {header.flag, header.status, header.length_low, header.length_high};
-            uint8_t ts_buffer[8] = {0};
-            size_t ts_len = 0;
-
-            // 檢查是否有 PTP 時戳
-            if (emac->ptp_auto_process && emac->ptp.enabled) {
-                ret = esp_eth_ptp_dm9058_parse_rx_header(rx_header_bytes, sizeof(rx_header_bytes),
-                                                          ETH_MAX_PACKET_SIZE, &rx_info);
-                if (ret == ESP_OK && rx_info.timestamp_available) {
-                    ts_len = rx_info.timestamp_len;
-                }
-            }
-            /* === PTP 預處理結束 === */
-
-            /* store the whole frame to preallocated memory */
-            if (rx_len <= ETH_MAX_PACKET_SIZE) {
-                ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, emac->rx_buffer, rx_len), err, TAG, "read rx data failed");
-
-                /* === 新增：讀取 PTP 時戳 === */
-                if (ts_len > 0) {
-                    // 時戳位於封包資料之後
-                    ESP_GOTO_ON_ERROR(DM9058_memory_read(emac, ts_buffer, ts_len), err, TAG, "read rx timestamp failed");
-
-                    // 解析並存儲時戳
-                    ret = esp_eth_ptp_dm9058_rx_timestamp(ts_buffer, ts_len, &emac->last_rx_timestamp);
-                    if (ret == ESP_OK) {
-                        emac->rx_timestamp_valid = true;
-                        ESP_LOGD(TAG, "RX timestamp: %lu.%09lu",
-                                 emac->last_rx_timestamp.seconds,
-                                 emac->last_rx_timestamp.nanoseconds);
-                    } else {
-                        emac->rx_timestamp_valid = false;
-                        ESP_LOGW(TAG, "Failed to parse RX timestamp");
-                    }
-                }
-                /* === PTP 時戳處理結束 === */
-            } else {
-                /* we are out of sync or data is corrupted, there is no way how to fix position in rx fifo => flush all */
-                ESP_GOTO_ON_ERROR(DM9058_flush_recv_queue(emac), err, TAG, "flush rx queue failed");
-                ESP_GOTO_ON_FALSE(false, ESP_FAIL, err, TAG, "invalid frame length, reset rx fifo pointer");
-            }
-            if (header.status & (RSR_RF | RSR_RWTO | RSR_CE | RSR_FOE)) {
-                /* erroneous frames should not be forwarded by DM9058, however, if it happens, just skip it */
-                DM9058_skip_recv_frame(emac, rx_len);
-                ESP_LOGE(TAG, "receive status error: %" PRIx8 "H", header.status);
-                /* try again to check if other frame is waiting */
-                try_again = true;
-            } else {
-                *size = rx_len;
-            }
-        }
-    } while (try_again);
-err:
-    return ret;
-}
-```
-
-### 4. 擴展 IOCTL 命令
-
-**位置**: `esp_eth_mac_spi.h` 中添加新命令：
+`examples/ethernet/ptp/main/ptp_main.c` 目前會依 `CONFIG_NETUTILS_PTPD_IEEE_802_1AS` 選擇 `IEEE_802_1AS` 或 `IEEE_802_3`：
 
 ```c
-typedef enum {
-    ETH_MAC_DM9058_CMD_PTP_ENABLE = ETH_CMD_CUSTOM_MAC_CMDS_OFFSET,
-    ETH_MAC_DM9058_CMD_S_PTP_TIME,
-    ETH_MAC_DM9058_CMD_G_PTP_TIME,
-    ETH_MAC_DM9058_CMD_ADJ_PTP_FREQ,
-    ETH_MAC_DM9058_CMD_ADJ_PTP_TIME,
-    ETH_MAC_DM9058_CMD_G_PTP_TX_TIME,
-    ETH_MAC_DM9058_CMD_S_TARGET_TIME,
-    ETH_MAC_DM9058_CMD_S_TARGET_CB,
-
-    /* === 新增命令 === */
-    ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS,     // 啟用/停用自動 PTP 處理
-    ETH_MAC_DM9058_CMD_PTP_SET_MODE,         // 設定 PTP 模式（單步/雙步）
-    ETH_MAC_DM9058_CMD_G_PTP_RX_TIME,        // 獲取最後的 RX 時戳
-} eth_mac_dm9058_io_cmd_t;
-```
-
-**位置**: `esp_eth_mac_dm9058.c` 的 `esp32_DM9058_custom_ioctl()` 函數（第 750 行）添加處理：
-
-```c
-static esp_err_t esp32_DM9058_custom_ioctl(esp_eth_mac_t *mac, int cmd, void *data)
-{
-    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
-    esp_eth_ptp_dm9058_time_t ptp_time = {0};
-    eth_mac_time_t *time = (eth_mac_time_t *)data;
-
-    switch (cmd) {
-    case ETH_MAC_DM9058_CMD_PTP_ENABLE:
-        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_ENABLE expects bool*");
-        return esp_eth_ptp_dm9058_enable(&emac->ptp, *(bool *)data, ESP_ETH_PTP_DM9058_TRANSPORT_UDP_IPV4);
-
-    /* ... 其他現有命令 ... */
-
-    /* === 新增命令處理 === */
-    case ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS:
-        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_AUTO_PROCESS expects bool*");
-        emac->ptp_auto_process = *(bool *)data;
-        ESP_LOGI(TAG, "PTP auto process %s", emac->ptp_auto_process ? "enabled" : "disabled");
-        return ESP_OK;
-
-    case ETH_MAC_DM9058_CMD_PTP_SET_MODE:
-        ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "PTP_SET_MODE expects bool*");
-        emac->ptp_two_step_mode = *(bool *)data;
-        ESP_LOGI(TAG, "PTP mode set to %s", emac->ptp_two_step_mode ? "two-step" : "one-step");
-        return ESP_OK;
-
-    case ETH_MAC_DM9058_CMD_G_PTP_RX_TIME:
-        ESP_RETURN_ON_FALSE(time != NULL, ESP_ERR_INVALID_ARG, TAG, "G_PTP_RX_TIME expects eth_mac_time_t*");
-        if (!emac->rx_timestamp_valid) {
-            return ESP_ERR_NOT_FOUND;
-        }
-        time->seconds = emac->last_rx_timestamp.seconds;
-        time->nanoseconds = emac->last_rx_timestamp.nanoseconds;
-        return ESP_OK;
-    /* === 新增命令結束 === */
-
-    default:
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-}
-```
-
-### 5. 初始化時設定預設值
-
-**位置**: `esp_eth_mac_dm9058.c` 的 `esp_eth_mac_new_dm9058()` 函數（第 1046 行）：
-
-```c
-esp_eth_mac_t *esp_eth_mac_new_dm9058(const eth_dm9058_config_t *DM9058_config, const eth_mac_config_t *mac_config)
-{
-    // ... 現有程式碼 ...
-
-    /* === 新增：初始化 PTP 配置 === */
-    emac->ptp_auto_process = false;        // 預設關閉自動處理
-    emac->ptp_two_step_mode = true;        // 預設使用雙步模式
-    emac->rx_timestamp_valid = false;
-    emac->tx_timestamp_valid = false;
-    memset(&emac->last_rx_timestamp, 0, sizeof(emac->last_rx_timestamp));
-    memset(&emac->last_tx_timestamp, 0, sizeof(emac->last_tx_timestamp));
-    /* === 初始化結束 === */
-
-    // ... 其餘程式碼 ...
-}
-```
-
-## 應用層使用範例
-
-### 範例 1：啟用全自動 PTP 處理
-
-```c
-#include "esp_eth.h"
-#include "esp_eth_mac_spi.h"
-
-void setup_auto_ptp(esp_eth_handle_t eth_handle)
-{
-    // 1. 啟用 PTP 硬體
-    bool enable = true;
-    esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_PTP_ENABLE, &enable);
-
-    // 2. 啟用自動 PTP 處理
-    bool auto_process = true;
-    esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS, &auto_process);
-
-    // 3. 設定 PTP 模式（可選，預設為雙步模式）
-    bool two_step = false;  // 使用單步模式
-    esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_PTP_SET_MODE, &two_step);
-
-    // 4. 設定初始時間
-    eth_mac_time_t init_time = {
-        .seconds = 0,
-        .nanoseconds = 0
-    };
-    esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_S_PTP_TIME, &init_time);
-
-    ESP_LOGI("PTP", "Auto PTP processing enabled");
-}
-
-void ptp_receive_handler(void *buffer, size_t len)
-{
-    // 封包已經由 MAC 層接收
-    // 如果是 PTP 封包，時戳已自動提取
-
-    // 可以讀取最後的 RX 時戳
-    esp_eth_handle_t eth_handle = /* 你的 eth handle */;
-    eth_mac_time_t rx_time;
-
-    if (esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_G_PTP_RX_TIME, &rx_time) == ESP_OK) {
-        ESP_LOGI("PTP", "RX timestamp: %lu.%09lu", rx_time.seconds, rx_time.nanoseconds);
-    }
-}
-
-void ptp_transmit_example(esp_eth_handle_t eth_handle, uint8_t *ptp_packet, size_t len)
-{
-    // 直接發送，PTP 硬體配置自動完成
-    esp_eth_transmit(eth_handle, ptp_packet, len);
-
-    // 等待一小段時間讓硬體完成發送
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    // 讀取 TX 時戳
-    eth_mac_time_t tx_time;
-    if (esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_G_PTP_TX_TIME, &tx_time) == ESP_OK) {
-        ESP_LOGI("PTP", "TX timestamp: %lu.%09lu", tx_time.seconds, tx_time.nanoseconds);
-    }
-}
-```
-
-### 範例 2：混合模式（部分自動）
-
-如果你想保留對某些 PTP 封包的手動控制：
-
-```c
-void setup_semi_auto_ptp(esp_eth_handle_t eth_handle)
-{
-    // 1. 啟用 PTP 硬體
-    bool enable = true;
-    esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_PTP_ENABLE, &enable);
-
-    // 2. 不啟用全自動處理（預設就是關閉）
-    bool auto_process = false;
-    esp_eth_ioctl(eth_handle, ETH_MAC_DM9058_CMD_PTP_AUTO_PROCESS, &auto_process);
-}
-
-void ptp_transmit_with_manual_control(esp_eth_handle_t eth_handle,
-                                      esp_eth_ptp_dm9058_t *ptp,
-                                      uint8_t *packet, size_t len)
-{
-    // 手動準備 TX
-    bool two_step_mode = true;
-    esp_eth_ptp_dm9058_prepare_tx(ptp, packet, len, two_step_mode);
-
-    // 發送
-    esp_eth_transmit(eth_handle, packet, len);
-
-    // 讀取時戳
-    esp_eth_ptp_dm9058_time_t tx_time;
-    esp_eth_ptp_dm9058_get_tx_timestamp(ptp, &tx_time);
-
-    ESP_LOGI("PTP", "Manual TX: %lu.%09lu", tx_time.seconds, tx_time.nanoseconds);
-}
-```
-
-## 方案二：異步時戳讀取（更高效）
-
-對於高性能需求，可以在中斷或獨立任務中異步讀取時戳：
-
-### 1. 在接收任務中處理時戳
-
-**位置**: `esp_eth_mac_dm9058.c` 的 `esp32_DM9058_task()` 函數（第 978 行）：
-
-```c
-static void esp32_DM9058_task(void *arg)
-{
-    esp32_DM9058_t *emac = (esp32_DM9058_t *)arg;
-    uint8_t status = 0;
-    while (1) {
-        // ... 現有的通知等待邏輯 ...
-
-        /* clear interrupt status */
-        DM9058_register_read(emac, DM9058_ISR, &status);
-        DM9058_register_write(emac, DM9058_ISR, status);
-
-        /* === 新增：處理 TX 完成後讀取時戳 === */
-        if ((status & ISR_PT) && emac->ptp_auto_process && emac->ptp.enabled) {
-            // TX 完成，讀取時戳
-            if (esp_eth_ptp_dm9058_get_tx_timestamp(&emac->ptp, &emac->last_tx_timestamp) == ESP_OK) {
-                emac->tx_timestamp_valid = true;
-                ESP_LOGD(TAG, "TX timestamp captured: %lu.%09lu",
-                         emac->last_tx_timestamp.seconds,
-                         emac->last_tx_timestamp.nanoseconds);
-            }
-        }
-        /* === TX 時戳處理結束 === */
-
-        /* packet received */
-        if (status & ISR_PR) {
-            do {
-                uint32_t buf_len;
-                if (emac->parent.receive(&emac->parent, emac->rx_buffer, &buf_len) == ESP_OK) {
-                    /* if there is waiting frame */
-                    if (buf_len > 0) {
-                        uint8_t *buffer = malloc(buf_len);
-                        if (buffer == NULL) {
-                            ESP_LOGE(TAG, "no mem for receive buffer");
-                        } else {
-                            memcpy(buffer, emac->rx_buffer, buf_len);
-                            ESP_LOGD(TAG, "receive len=%" PRIu32, buf_len);
-
-                            /* === 新增：如果有 RX 時戳，附加到封包資訊 === */
-                            // 這裡可以擴展 stack_input 來傳遞時戳資訊
-                            // 或者使用應用層回調來通知時戳
-                            /* === RX 時戳通知結束 === */
-
-                            /* pass the buffer to stack (e.g. TCP/IP layer) */
-                            emac->eth->stack_input(emac->eth, buffer, buf_len);
-                        }
-                    }
-                } else {
-                    ESP_LOGE(TAG, "frame read from module failed");
-                }
-            } while (emac->packets_remain);
-        }
-    }
-    vTaskDelete(NULL);
-}
-```
-
-## 性能考量
-
-### 1. 自動處理的開銷
-
-在每次 `transmit` 調用時：
-- **封包解析**: ~50-100 μs（取決於封包大小）
-- **暫存器配置**: ~10-20 μs（2-3 次 SPI 傳輸）
-- **總開銷**: ~60-120 μs
-
-對於大多數應用（封包速率 < 10000 pps），這個開銷可以忽略不計。
-
-### 2. 優化建議
-
-**方案 A**：快速路徑優化
-```c
-static esp_err_t esp32_DM9058_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t length)
-{
-    esp32_DM9058_t *emac = __containerof(mac, esp32_DM9058_t, parent);
-
-    // 快速路徑：如果 PTP 未啟用，直接跳過
-    if (emac->ptp_auto_process && emac->ptp.enabled) {
-        // 進一步優化：快速檢查 EtherType
-        uint16_t ethertype = ((uint16_t)buf[12] << 8) | buf[13];
-        if (ethertype == 0x88F7 || ethertype == 0x0800) {
-            // 可能是 PTP，執行完整檢查
-            esp_eth_ptp_dm9058_prepare_tx(&emac->ptp, buf, length, emac->ptp_two_step_mode);
-        }
-    }
-
-    // ... 其餘發送邏輯 ...
-}
-```
-
-**方案 B**：針對特定埠號的優化
-```c
-typedef struct {
-    // ... 現有欄位 ...
-    bool ptp_filter_ports;              // 是否過濾特定 UDP 埠
-    uint16_t ptp_event_port;            // PTP event 埠（預設 319）
-    uint16_t ptp_general_port;          // PTP general 埠（預設 320）
-} esp32_DM9058_t;
-
-// 在 transmit 中使用：
-if (emac->ptp_filter_ports) {
-    // 只檢查目標埠為 319 或 320 的 UDP 封包
-    // 進一步減少非 PTP 封包的處理開銷
-}
-```
-
-## 除錯和日誌
-
-### 添加條件編譯的除錯日誌
-
-在 `esp_eth_mac_dm9058.c` 頂部添加：
-
-```c
-#define DM9058_PTP_DEBUG 1
-
-#if DM9058_PTP_DEBUG
-#define PTP_LOGD(tag, format, ...) ESP_LOGD(tag, format, ##__VA_ARGS__)
-#define PTP_LOGI(tag, format, ...) ESP_LOGI(tag, format, ##__VA_ARGS__)
+esp_eth_clock_cfg_t clock_cfg = {
+    .eth_hndl  = s_eth_handles[0],
+#if CONFIG_NETUTILS_PTPD_IEEE_802_1AS
+    .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_1AS,
 #else
-#define PTP_LOGD(tag, format, ...)
-#define PTP_LOGI(tag, format, ...)
+    .transport = ESP_ETH_PTP_DM9058_TRANSPORT_IEEE_802_3,
 #endif
+};
+esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clock_cfg);
 ```
 
-使用範例：
+## TX 自動處理
+
+目前 `esp32_DM9058_transmit()` 的主要流程是：
+
+1. 等待 TX pointer ready。
+2. 進入 `multi_reg_axs_mutex` 保護區。
+3. 若 `ptp_auto_process && ptp.enabled`，呼叫 `esp_eth_ptp_dm9058_prepare_tx_locked()`。
+4. 寫入 TX 長度與 frame data。
+5. 觸發 `TCR_TXREQ`。
+6. PTP 啟用時等待 TX complete。
+
+目前實作重點如下：
+
 ```c
 if (emac->ptp_auto_process && emac->ptp.enabled) {
-    ret = esp_eth_ptp_dm9058_prepare_tx(&emac->ptp, buf, length, emac->ptp_two_step_mode);
-    PTP_LOGD(TAG, "PTP prepare_tx result: %d", ret);
+    esp_err_t ptp_ret = esp_eth_ptp_dm9058_prepare_tx_locked(&emac->ptp, buf, length, emac->ptp_two_step_mode);
+    if (ptp_ret != ESP_OK) {
+        ESP_LOGW(TAG, "prepare tx ptp failed: %s", esp_err_to_name(ptp_ret));
+    }
 }
 ```
+
+`prepare_tx_locked()` 會使用 `esp_eth_ptp_dm9058_parse_tx_packet()` 判斷封包類型，然後設定 `TCR` 內的 `TSEN_CAP` 與 `TS1STEP_EMIT`。
+
+### TX timestamp 回傳
+
+有兩種常見方式：
+
+- 一般 ioctl：使用 `ETH_MAC_DM9058_CMD_G_PTP_TX_TIME` 讀取 DM9058 最近一次 TX timestamp。
+- L2TAP / extended path：由 `esp32_DM9058_transmit_ctrl_vargs()` 在送出後把 timestamp 寫入 `eth_mac_time_t` 控制資料，L2TAP 再以 `L2TAP_IREC_TIME_STAMP` 回傳給 ptpd。
+
+## RX timestamp 自動處理
+
+目前 RX timestamp 不使用 MAC 物件上的最後一筆快取，而是在 RX task 中保持 frame-bound 流程：
+
+1. `DM9058_task_receive()` 呼叫 `DM9058_frame_to_rx_buffer()`。
+2. `DM9058_handle_rx_ptp_timestamp()` 解析 RX header。
+3. 若 RX FIFO 內含 timestamp，讀出 4 或 8 byte timestamp。
+4. `esp_eth_ptp_dm9058_rx_timestamp()` 解碼成 `esp_eth_ptp_dm9058_time_t`。
+5. `esp32_DM9058_task()` 再檢查 frame 是否為允許上送 timestamp 的 PTP event 訊息。
+6. 呼叫 `stack_input_info()`，把 frame 與可選的 `eth_mac_time_t` 一起交給上層。
+
+目前會上送 RX timestamp 的訊息型別：
+
+| 訊息型別 | 是否上送 RX timestamp |
+| --- | --- |
+| `SYNC` | 是 |
+| `DELAY_REQ` | 是 |
+| `PDELAY_REQ` | 是 |
+| `PDELAY_RESP` | 是 |
+| `FOLLOW_UP` | 否 |
+| `DELAY_RESP` | 否 |
+| `ANNOUNCE` | 否 |
+| 其他 general message | 否 |
+
+這個策略符合 PTP event message 需要精準 timestamp 的需求，也避免把 general message 的 timestamp 誤交給上層。
+
+## L2TAP / ptpd 對接
+
+`examples/ethernet/ptp/components/ptpd/ptpd.c` 的 ESP PTP 路徑使用 `/dev/net/tap` 收發 EtherType `0x88F7` frame。收發時都配置 `L2TAP_IREC_TIME_STAMP`：
+
+```c
+l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&ptp_msg_ext_buff);
+ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
+ts_info->type = L2TAP_IREC_TIME_STAMP;
+```
+
+TX 時，`write()` 完成後從 info record 取回 TX timestamp。RX 時，`read()` 完成後從 info record 取回 frame-bound RX timestamp。這條路徑是目前 DM9058 PTP example 的主要 timestamp 來源。
+
+## 已不採用的舊設計
+
+以下舊提案不再適用於目前專案：
+
+- PTP enable 只傳 `bool`。目前必須傳 `esp_eth_ptp_dm9058_enable_config_t`。
+- 新增執行期 set-mode ioctl。one-step / two-step 目前由 `CONFIG_ETH_DM9058_PTP_TWO_STEP_MODE` 決定。
+- 在 `esp32_DM9058_t` 上快取 `last_rx_timestamp`，再由應用層事後讀取。這會破壞 RX timestamp 與封包的精準綁定。
+- 應用層收到封包後再輪詢 RX timestamp。DM9058 driver 目前明確不支援這條路徑。
+- 使用 `esp_eth_ptp_dm9058_parse_rx_packet()` 作為現行 API。該函式目前在 `#if 0` 區塊中，不是可用的正式路徑。
+- 以 driver-local debug macro 取代 ESP-IDF 既有 logging pattern。現行程式仍使用 `ESP_LOGx()`。
+
+## 後續優化項目
+
+### 1. 補齊 TX IPv6 PTP 封包解析
+
+目前 enable 階段支援 `UDP_IPV6` transport offset，但 `esp_eth_ptp_dm9058_parse_tx_packet()` 的封包解析主要覆蓋 Layer 2 PTP 與 UDP/IPv4 PTP。若要完整支援 PTP over UDP/IPv6，應在 TX parser 中加入 IPv6 header、extension header 與 UDP port 319/320 的解析。
+
+建議範圍：
+
+- 在 `esp_eth_ptp_dm9058_parse_tx_packet()` 新增 IPv6 path。
+- 保留現有 L2 與 IPv4 path 行為。
+- 增加針對 `SYNC`、`DELAY_REQ`、`PDELAY_REQ`、`PDELAY_RESP` 的單元測試或最小封包測試資料。
+
+### 2. 評估 Target Time / callback 正式化
+
+`ETH_MAC_DM9058_CMD_S_TARGET_TIME` 與 `ETH_MAC_DM9058_CMD_S_TARGET_CB` 目前 enum 與部分註解骨架仍存在，但實際 case 回傳 `ESP_ERR_NOT_SUPPORTED`。若 example 仍需要 GPIO pulse target time，應決定要走正式 driver 功能，或改在 example 層清楚標示該功能尚未可用。
+
+建議範圍：
+
+- 釐清 DM9058 是否能以硬體中斷或 timer 可靠觸發 target time。
+- 若使用軟體 timer，需要明確標示精度限制。
+- 補齊 callback lifetime、ISR 安全性與 deinit 清理。
+
+### 3. 明確化 RX event message policy
+
+目前 MAC 層已上送四種 event message 的 RX timestamp。若後續 profile 或 daemon 行為需要更精細控制，可考慮把 filter policy 變成明確 helper，例如：
+
+```c
+static bool dm9058_should_forward_rx_timestamp(uint8_t message_type)
+{
+    switch (message_type) {
+    case ESP_ETH_PTP_DM9058_MSG_SYNC:
+    case ESP_ETH_PTP_DM9058_MSG_DELAY_REQ:
+    case ESP_ETH_PTP_DM9058_MSG_PDELAY_REQ:
+    case ESP_ETH_PTP_DM9058_MSG_PDELAY_RESP:
+        return true;
+    default:
+        return false;
+    }
+}
+```
+
+這類重構不改變行為，但能降低後續修改時漏改條件的風險。
+
+### 4. 清理 RX helper API 邊界
+
+目前 `esp_eth_ptp_dm9058_parse_rx_header()` 和 `esp_eth_ptp_dm9058_rx_timestamp()` 是現行可用 helper；`parse_rx_packet()` 停用。後續可二選一：
+
+- 移除停用函式，避免誤導使用者。
+- 或正式恢復並調整成符合目前 FIFO 讀取順序的 API。
+
+若恢復，必須避免 helper 內自行做 RX ready dummy read，否則可能和 MAC RX task 的 FIFO 操作順序互相干擾。
+
+### 5. 增加文件化測試步驟
+
+建議在 PTP example README 或本文件補充最小驗證流程：
+
+- `CONFIG_ETH_DM9058_PTP_TWO_STEP_MODE` 與 `CONFIG_NETUTILS_PTPD_TWOSTEP_SYNC` 是否一致。
+- `CONFIG_NETUTILS_PTPD_IEEE_802_1AS` 是否符合 `ptp_main.c` transport。
+- L2TAP 是否成功開啟 timestamp。
+- ptpd log 是否能看到 RX timestamp。
+- master / slave 是否能穩定進入 selected clock source 狀態。
+
+## 建議優先順序
+
+1. 文件與範例清理：移除舊 API 與 RX polling 誤導。
+2. RX event message policy helper：低風險、可讀性提升。
+3. TX IPv6 parser：中等風險，需要封包測試。
+4. Target Time / callback：高風險，需要硬體行為與精度驗證。
+5. RX helper API 整理：中等風險，需要確認 FIFO 操作順序。
 
 ## 總結
 
-### 優勢
-
-1. **無縫整合**: PTP 功能透明地整合到 MAC 層
-2. **自動化**: 應用層無需手動調用 PTP 函數
-3. **靈活性**: 支援全自動和半自動模式
-4. **向後相容**: 不影響現有非 PTP 應用
-
-### 使用建議
-
-| 場景 | 推薦配置 | 說明 |
-|------|----------|------|
-| PTP 從時鐘 | 全自動 + 雙步模式 | 自動處理所有 PTP 封包 |
-| PTP 主時鐘 | 全自動 + 單步模式 | 硬體自動插入 SYNC 時戳 |
-| 混合應用 | 半自動模式 | 手動控制關鍵封包 |
-| 高性能需求 | 異步時戳讀取 | 在中斷中處理時戳 |
-| 非 PTP 應用 | 關閉自動處理 | 零開銷 |
-
-### 實作順序建議
-
-1. **第一階段**: 實作基本的自動處理（transmit 中調用 prepare_tx）
-2. **第二階段**: 添加 RX 時戳提取和存儲
-3. **第三階段**: 實作新的 IOCTL 命令
-4. **第四階段**: 添加性能優化（快速路徑、埠過濾）
-5. **第五階段**: 實作異步時戳讀取
-
-每個階段都可以獨立測試和部署。
+目前 DM9058 PTP 的主要整合目標已經完成：TX 由 MAC 自動配置硬體 timestamp 行為，RX 由 MAC task 以 packet-bound metadata 往上傳遞，PTP example 透過 L2TAP extended buffer 使用 timestamp。後續優化應集中在補齊未完成能力、清理停用 API、增加測試與文件一致性，而不是回到舊版的「應用層輪詢最後一筆 RX timestamp」設計。
